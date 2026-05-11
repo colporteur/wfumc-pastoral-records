@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import LoadingSpinner from '../components/LoadingSpinner.jsx';
+import PersonPhotos from '../components/PersonPhotos.jsx';
+import PersonFamilyLinks from '../components/PersonFamilyLinks.jsx';
+import PersonExtendedFamily from '../components/PersonExtendedFamily.jsx';
 import {
   deletePerson,
   fullName,
@@ -173,6 +176,8 @@ export default function PersonDetail() {
           </Field>
         </Grid>
       </Section>
+
+      <PersonPhotos personId={id} />
 
       <Section title="Contact">
         <Grid>
@@ -434,6 +439,10 @@ export default function PersonDetail() {
           placeholder="Anything else worth remembering. (Pastoral interaction logs, prayer requests, eulogy notes, and core issues will get their own dedicated sections in later phases.)"
         />
       </Section>
+
+      <PersonFamilyLinks personId={id} />
+
+      <PersonExtendedFamily personId={id} />
 
       <Section title="Deceased">
         <label className="inline-flex items-center gap-2 text-sm cursor-pointer">

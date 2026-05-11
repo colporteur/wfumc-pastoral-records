@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import LoadingSpinner from '../components/LoadingSpinner.jsx';
 import { listPeople, fullName } from '../lib/people';
+import { fetchMainPhotoUrlsForPeople } from '../lib/photos';
 
 // People list. URL-persisted search + filters so back-navigation
 // preserves what the pastor was looking at.
@@ -30,6 +31,7 @@ export default function PersonList() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [people, setPeople] = useState([]);
+  const [photoUrls, setPhotoUrls] = useState(new Map());
 
   useEffect(() => {
     let cancelled = false;
@@ -42,7 +44,18 @@ export default function PersonList() {
           filters,
           includeDeceased: includeDeceased || filters.is_deceased,
         });
-        if (!cancelled) setPeople(rows);
+        if (cancelled) return;
+        setPeople(rows);
+        // Batch-fetch main-photo signed URLs for the visible page.
+        try {
+          const urlMap = await fetchMainPhotoUrlsForPeople(
+            rows.map((r) => r.id)
+          );
+          if (!cancelled) setPhotoUrls(urlMap);
+        } catch {
+          // Non-fatal — list still renders without thumbnails.
+          if (!cancelled) setPhotoUrls(new Map());
+        }
       } catch (e) {
         if (!cancelled) setError(e.message || String(e));
       } finally {
@@ -168,7 +181,28 @@ export default function PersonList() {
                 to={`/people/${p.id}`}
                 className="block px-4 py-3 hover:bg-gray-50"
               >
-                <div className="flex items-baseline justify-between gap-2 flex-wrap">
+                <div className="flex items-start gap-3">
+                  <div className="flex-shrink-0">
+                    {photoUrls.get(p.id) ? (
+                      <img
+                        src={photoUrls.get(p.id)}
+                        alt=""
+                        className="w-10 h-10 rounded-full object-cover bg-gray-200"
+                        loading="lazy"
+                      />
+                    ) : (
+                      <div
+                        className="w-10 h-10 rounded-full bg-umc-100 text-umc-700 flex items-center justify-center text-xs font-semibold"
+                        aria-hidden="true"
+                      >
+                        {(p.preferred_name || p.first_name || '?')
+                          .charAt(0)
+                          .toUpperCase()}
+                        {(p.last_name || '').charAt(0).toUpperCase()}
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex-1 min-w-0 flex items-baseline justify-between gap-2 flex-wrap">
                   <div className="min-w-0">
                     <div className="font-medium text-gray-900 truncate">
                       {fullName(p)}
@@ -205,6 +239,7 @@ export default function PersonList() {
                     {p.on_christmas_card_list && (
                       <Badge color="red">🎄</Badge>
                     )}
+                  </div>
                   </div>
                 </div>
               </Link>
