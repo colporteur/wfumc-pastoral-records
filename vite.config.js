@@ -30,6 +30,19 @@ export default defineConfig({
         display: 'standalone',
         start_url: base,
         scope: base,
+        // Web Share Target — Plaud / Google Recorder / any app's
+        // "share to..." button can hand a transcript over to this app.
+        // GET method with URL params keeps it simple (POST would
+        // require a service-worker handler).
+        share_target: {
+          action: base + 'share',
+          method: 'GET',
+          params: {
+            title: 'title',
+            text: 'text',
+            url: 'url',
+          },
+        },
         icons: [
           {
             src: 'icons/icon-192.png',

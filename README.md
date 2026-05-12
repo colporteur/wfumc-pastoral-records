@@ -18,16 +18,32 @@ This is the foundation. It ships with:
 
 ## Coming in later phases
 
-- Photos (main + additional)
-- Family relationship links between records (bidirectional)
-- Pastoral interaction logs (office / pastoral / home / hospital visits)
-- Conversation transcripts + audio import (Plaud / Google Recorder) with
-  Claude trimming + summarization
-- "Core pastoral issues" with one-click promote from logs
-- Linked prayer requests / bulletin submissions
 - Document & screenshot archive with Claude summarization
 - End-of-life workflow: deceased details, obituary, eulogy notes,
   Claude-assisted eulogy synthesis tool
+- Direct Plaud API integration (see "Plaud integration" below)
+
+## Plaud integration
+
+**Status (May 2026):** Plaud has a Developer Platform with OAuth + webhook
+APIs, but the OAuth API is currently in private beta. The recommended path
+is to sign up for the waitlist at
+https://www.plaud.ai/pages/developer-platform — when approved, we can build
+a proper Supabase Edge Function endpoint that ingests webhook events,
+verifies signatures, and matches incoming transcripts to people in the
+directory.
+
+**In the meantime:** the app supports two import paths that work today:
+
+1. **Paste flow** (desktop): copy the transcript Plaud's app generates,
+   open the person's record, paste into a new transcript.
+2. **Web Share Target** (mobile, PWA-installed): tap "share" on Plaud's
+   transcript, pick "WFUMC Pastoral Records" from the share sheet, the
+   app opens at `/share` with the text pre-filled. Pick a person, save.
+
+After import, "✨ Summarize" and "✂ Trim" buttons let Claude clean up
+the transcript, and "✨ Suggest issues" promotes pastoral concerns to
+core issues.
 
 ## Setup
 

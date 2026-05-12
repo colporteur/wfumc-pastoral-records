@@ -7,13 +7,15 @@ import {
   updateNote,
 } from '../lib/notesLog';
 import { promoteToCoreIssue } from '../lib/coreIssues';
+import CoreIssueSuggesterButton from './CoreIssueSuggesterButton.jsx';
 
 // Running pastoral note log per person. Distinct from the per-person
 // `notes` field on pastoral_people — that's one bag of text, this is
 // a dated stream.
 
-export default function PersonNotes({ personId, onChanged }) {
+export default function PersonNotes({ person, onChanged }) {
   const { user } = useAuth();
+  const personId = person?.id;
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -184,11 +186,19 @@ export default function PersonNotes({ personId, onChanged }) {
                       <div className="text-[10px] text-gray-500">
                         {new Date(it.noted_at).toLocaleString()}
                       </div>
-                      <div className="flex gap-3 text-xs">
+                      <div className="flex gap-3 text-xs flex-wrap">
+                        <CoreIssueSuggesterButton
+                          person={person}
+                          source={it}
+                          sourceType="note"
+                          sourceText={it.body || ''}
+                          onPromoted={onChanged}
+                        />
                         <button
                           type="button"
                           onClick={() => handlePromote(it)}
-                          className="text-umc-700 hover:text-umc-900 underline"
+                          className="text-gray-600 hover:text-gray-900 underline"
+                          title="Promote directly without Claude suggestions"
                           disabled={busy}
                         >
                           → Core issue

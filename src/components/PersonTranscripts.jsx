@@ -7,6 +7,13 @@ import {
   updateTranscript,
 } from '../lib/transcripts';
 import { promoteToCoreIssue } from '../lib/coreIssues';
+import {
+  proposeTranscriptTrim,
+  summarizeTranscript,
+} from '../lib/claude';
+import { fullName } from '../lib/people';
+import CoreIssueSuggesterButton from './CoreIssueSuggesterButton.jsx';
+import TranscriptTrimModal from './TranscriptTrimModal.jsx';
 
 const BLANK_FORM = {
   title: '',
@@ -39,8 +46,9 @@ function localToIso(local) {
   return isNaN(d.getTime()) ? null : d.toISOString();
 }
 
-export default function PersonTranscripts({ personId, onChanged }) {
+export default function PersonTranscripts({ person, onChanged }) {
   const { user } = useAuth();
+  const personId = person?.id;
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -51,6 +59,8 @@ export default function PersonTranscripts({ personId, onChanged }) {
   const [editForm, setEditForm] = useState(BLANK_FORM);
   const [busy, setBusy] = useState(false);
   const [expandedId, setExpandedId] = useState(null);
+  const [summarizingId, setSummarizingId] = useState(null);
+  const [trimmingTranscript, setTrimmingTranscript] = useState(null);
 
   const refresh = async () => {
     if (!personId) return;
@@ -152,6 +162,32 @@ export default function PersonTranscripts({ personId, onChanged }) {
     } finally {
       setBusy(false);
     }
+  };
+
+  const handleSummarize = async (item) => {
+    setSummarizingId(item.id);
+    setError(null);
+    try {
+      const summary = await summarizeTranscript({
+        transcriptText: item.transcript_text,
+        personName: fullName(person),
+        title: item.title,
+      });
+      await updateTranscript(item.id, { summary });
+      await refresh();
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      setSummarizingId(null);
+    }
+  };
+
+  const handleAcceptTrim = async (newText) => {
+    if (!trimmingTranscript) return;
+    await updateTranscript(trimmingTranscript.id, {
+      transcript_text: newText,
+    });
+    await refresh();
   };
 
   const renderForm = (form, setForm) => (
@@ -304,12 +340,46 @@ export default function PersonTranscripts({ personId, onChanged }) {
                           )}
                         </div>
                       </div>
-                      <div className="flex gap-3 text-xs">
+                      <div className="flex gap-3 text-xs flex-wrap">
+                        <button
+                          type="button"
+                          onClick={() => handleSummarize(it)}
+                          disabled={
+                            summarizingId === it.id ||
+                            !it.transcript_text?.trim()
+                          }
+                          className="text-umc-700 hover:text-umc-900 underline disabled:opacity-50"
+                          title="Have Claude write a 2-4 sentence summary"
+                        >
+                          {summarizingId === it.id
+                            ? '…'
+                            : '✨ Summarize'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setTrimmingTranscript(it)}
+                          disabled={!it.transcript_text?.trim()}
+                          className="text-umc-700 hover:text-umc-900 underline disabled:opacity-50"
+                          title="Trim small talk, keep pastoral content"
+                        >
+                          ✂ Trim
+                        </button>
+                        <CoreIssueSuggesterButton
+                          person={person}
+                          source={it}
+                          sourceType="transcript"
+                          sourceText={
+                            (it.transcript_text || '') +
+                            (it.summary ? '\n\nSummary: ' + it.summary : '')
+                          }
+                          onPromoted={onChanged}
+                        />
                         <button
                           type="button"
                           onClick={() => handlePromote(it)}
-                          className="text-umc-700 hover:text-umc-900 underline"
+                          className="text-gray-600 hover:text-gray-900 underline"
                           disabled={busy}
+                          title="Promote directly without Claude suggestions"
                         >
                           → Core issue
                         </button>
@@ -363,6 +433,14 @@ export default function PersonTranscripts({ personId, onChanged }) {
           })}
         </ul>
       )}
+
+      <TranscriptTrimModal
+        open={!!trimmingTranscript}
+        transcript={trimmingTranscript}
+        person={person}
+        onClose={() => setTrimmingTranscript(null)}
+        onAccept={handleAcceptTrim}
+      />
     </>
   );
 }

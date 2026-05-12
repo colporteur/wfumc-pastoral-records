@@ -454,15 +454,15 @@ export default function PersonDetail() {
       </Section>
 
       <Section title="Pastoral interactions">
-        <PersonInteractions personId={id} onChanged={refreshCoreIssues} />
+        <PersonInteractions person={saved} onChanged={refreshCoreIssues} />
       </Section>
 
       <Section title="Conversation transcripts">
-        <PersonTranscripts personId={id} onChanged={refreshCoreIssues} />
+        <PersonTranscripts person={saved} onChanged={refreshCoreIssues} />
       </Section>
 
       <Section title="Pastoral notes log">
-        <PersonNotes personId={id} onChanged={refreshCoreIssues} />
+        <PersonNotes person={saved} onChanged={refreshCoreIssues} />
       </Section>
 
       <Section title="Core pastoral issues" defaultOpen={true}>

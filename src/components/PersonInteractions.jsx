@@ -9,6 +9,7 @@ import {
   updateInteraction,
 } from '../lib/interactions';
 import { promoteToCoreIssue } from '../lib/coreIssues';
+import CoreIssueSuggesterButton from './CoreIssueSuggesterButton.jsx';
 
 const BLANK_FORM = {
   interaction_type: 'pastoral_conversation',
@@ -47,8 +48,9 @@ function isoToLocal(iso) {
   );
 }
 
-export default function PersonInteractions({ personId, onChanged }) {
+export default function PersonInteractions({ person, onChanged }) {
   const { user } = useAuth();
+  const personId = person?.id;
   const [items, setItems] = useState([]);
   const [filter, setFilter] = useState('all');
   const [loading, setLoading] = useState(true);
@@ -362,12 +364,22 @@ export default function PersonInteractions({ personId, onChanged }) {
                           <span className="ml-2">· {it.location}</span>
                         ) : null}
                       </div>
-                      <div className="flex gap-3 text-xs">
+                      <div className="flex gap-3 text-xs flex-wrap">
+                        <CoreIssueSuggesterButton
+                          person={person}
+                          source={it}
+                          sourceType="interaction"
+                          sourceText={
+                            (it.summary ? it.summary + '\n\n' : '') +
+                            (it.body || '')
+                          }
+                          onPromoted={onChanged}
+                        />
                         <button
                           type="button"
                           onClick={() => handlePromote(it)}
-                          className="text-umc-700 hover:text-umc-900 underline"
-                          title="Create a core pastoral issue from this interaction"
+                          className="text-gray-600 hover:text-gray-900 underline"
+                          title="Promote directly without Claude suggestions"
                           disabled={busy}
                         >
                           → Core issue

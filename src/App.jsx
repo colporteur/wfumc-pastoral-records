@@ -5,6 +5,7 @@ import PersonList from './pages/PersonList.jsx';
 import PersonNew from './pages/PersonNew.jsx';
 import PersonDetail from './pages/PersonDetail.jsx';
 import ImportPage from './pages/ImportPage.jsx';
+import ShareTarget from './pages/ShareTarget.jsx';
 import NotFound from './pages/NotFound.jsx';
 import ProtectedRoute from './components/ProtectedRoute.jsx';
 import AppLayout from './components/AppLayout.jsx';
@@ -26,6 +27,7 @@ export default function App() {
         <Route path="/people/new" element={<PersonNew />} />
         <Route path="/people/:id" element={<PersonDetail />} />
         <Route path="/import" element={<ImportPage />} />
+        <Route path="/share" element={<ShareTarget />} />
       </Route>
 
       <Route path="*" element={<NotFound />} />
