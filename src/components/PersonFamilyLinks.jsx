@@ -149,10 +149,9 @@ export default function PersonFamilyLinks({ personId }) {
   };
 
   return (
-    <section className="card space-y-3">
-      <div className="flex items-baseline justify-between gap-2 flex-wrap">
-        <h2 className="font-serif text-lg text-umc-900">Family (in directory)</h2>
-        {!adding && (
+    <>
+      {!adding && (
+        <div className="flex justify-end">
           <button
             type="button"
             onClick={() => setAdding(true)}
@@ -160,8 +159,8 @@ export default function PersonFamilyLinks({ personId }) {
           >
             + Add family link
           </button>
-        )}
-      </div>
+        </div>
+      )}
 
       {error && (
         <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1">
@@ -336,6 +335,6 @@ export default function PersonFamilyLinks({ personId }) {
           })}
         </ul>
       )}
-    </section>
+    </>
   );
 }

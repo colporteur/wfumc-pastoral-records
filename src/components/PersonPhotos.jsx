@@ -107,27 +107,24 @@ export default function PersonPhotos({ personId }) {
   };
 
   return (
-    <section className="card space-y-3">
-      <div className="flex items-baseline justify-between gap-2 flex-wrap">
-        <h2 className="font-serif text-lg text-umc-900">Photos</h2>
-        <div>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            multiple
-            className="hidden"
-            onChange={(e) => handleFiles(e.target.files)}
-          />
-          <button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={uploading}
-            className="btn-secondary text-xs disabled:opacity-50"
-          >
-            {uploading ? 'Uploading…' : '+ Upload photo(s)'}
-          </button>
-        </div>
+    <>
+      <div className="flex justify-end">
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          multiple
+          className="hidden"
+          onChange={(e) => handleFiles(e.target.files)}
+        />
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={uploading}
+          className="btn-secondary text-xs disabled:opacity-50"
+        >
+          {uploading ? 'Uploading…' : '+ Upload photo(s)'}
+        </button>
       </div>
 
       {error && (
@@ -239,6 +236,6 @@ export default function PersonPhotos({ personId }) {
           })}
         </ul>
       )}
-    </section>
+    </>
   );
 }

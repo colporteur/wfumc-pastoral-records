@@ -1,27 +1,45 @@
 import { useEffect, useState } from 'react';
 import { useAuth } from '../contexts/AuthContext.jsx';
 import {
-  createExtendedFamily,
-  deleteExtendedFamily,
-  listExtendedFamily,
-  updateExtendedFamily,
-} from '../lib/extendedFamily';
-
-// Extended-family child records: relatives who AREN'T in the pastoral
-// directory themselves. (Family who ARE in the directory go in
-// PersonFamilyLinks above.)
+  createTranscript,
+  deleteTranscript,
+  listTranscripts,
+  updateTranscript,
+} from '../lib/transcripts';
+import { promoteToCoreIssue } from '../lib/coreIssues';
 
 const BLANK_FORM = {
-  name: '',
-  relationship: '',
-  location: '',
-  gender: '',
-  age: '',
-  visit_history: '',
-  notes: '',
+  title: '',
+  recorded_at: '',
+  transcript_text: '',
+  summary: '',
 };
 
-export default function PersonExtendedFamily({ personId }) {
+function isoToLocal(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const pad = (n) => String(n).padStart(2, '0');
+  return (
+    d.getFullYear() +
+    '-' +
+    pad(d.getMonth() + 1) +
+    '-' +
+    pad(d.getDate()) +
+    'T' +
+    pad(d.getHours()) +
+    ':' +
+    pad(d.getMinutes())
+  );
+}
+
+function localToIso(local) {
+  if (!local) return null;
+  const d = new Date(local);
+  return isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+export default function PersonTranscripts({ personId, onChanged }) {
   const { user } = useAuth();
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -32,13 +50,14 @@ export default function PersonExtendedFamily({ personId }) {
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState(BLANK_FORM);
   const [busy, setBusy] = useState(false);
+  const [expandedId, setExpandedId] = useState(null);
 
   const refresh = async () => {
     if (!personId) return;
     setLoading(true);
     setError(null);
     try {
-      const rows = await listExtendedFamily(personId);
+      const rows = await listTranscripts(personId);
       setItems(rows);
     } catch (e) {
       setError(e.message || String(e));
@@ -54,17 +73,16 @@ export default function PersonExtendedFamily({ personId }) {
 
   const handleAdd = async () => {
     if (!user?.id) return;
-    if (!addForm.name.trim()) {
-      setError('Name is required.');
-      return;
-    }
     setBusy(true);
     setError(null);
     try {
-      await createExtendedFamily({
+      await createTranscript({
         ownerUserId: user.id,
         personId,
-        patch: addForm,
+        patch: {
+          ...addForm,
+          recorded_at: localToIso(addForm.recorded_at),
+        },
       });
       setAddForm(BLANK_FORM);
       setAdding(false);
@@ -79,13 +97,10 @@ export default function PersonExtendedFamily({ personId }) {
   const startEdit = (item) => {
     setEditingId(item.id);
     setEditForm({
-      name: item.name || '',
-      relationship: item.relationship || '',
-      location: item.location || '',
-      gender: item.gender || '',
-      age: item.age || '',
-      visit_history: item.visit_history || '',
-      notes: item.notes || '',
+      title: item.title || '',
+      recorded_at: isoToLocal(item.recorded_at),
+      transcript_text: item.transcript_text || '',
+      summary: item.summary || '',
     });
   };
 
@@ -93,7 +108,10 @@ export default function PersonExtendedFamily({ personId }) {
     setBusy(true);
     setError(null);
     try {
-      await updateExtendedFamily(item.id, editForm);
+      await updateTranscript(item.id, {
+        ...editForm,
+        recorded_at: localToIso(editForm.recorded_at),
+      });
       setEditingId(null);
       await refresh();
     } catch (e) {
@@ -104,12 +122,31 @@ export default function PersonExtendedFamily({ personId }) {
   };
 
   const handleDelete = async (item) => {
-    if (!window.confirm(`Remove ${item.name} from extended family?`)) return;
+    if (!window.confirm('Delete this transcript?')) return;
     setBusy(true);
     setError(null);
     try {
-      await deleteExtendedFamily(item.id);
+      await deleteTranscript(item.id);
       await refresh();
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handlePromote = async (item) => {
+    if (!user?.id) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await promoteToCoreIssue({
+        ownerUserId: user.id,
+        personId,
+        source: item,
+        sourceType: 'transcript',
+      });
+      if (onChanged) onChanged();
     } catch (e) {
       setError(e.message || String(e));
     } finally {
@@ -120,88 +157,70 @@ export default function PersonExtendedFamily({ personId }) {
   const renderForm = (form, setForm) => (
     <div className="space-y-2">
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-        <Field label="Name *">
+        <FieldLabel label="Title">
           <input
             type="text"
             className="input text-sm"
-            value={form.name}
-            onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-          />
-        </Field>
-        <Field label="Relationship">
-          <input
-            type="text"
-            className="input text-sm"
-            value={form.relationship}
+            value={form.title}
             onChange={(e) =>
-              setForm((f) => ({ ...f, relationship: e.target.value }))
+              setForm((f) => ({ ...f, title: e.target.value }))
             }
-            placeholder="e.g. daughter, son-in-law, great-aunt"
+            placeholder="e.g. Hospital bedside conversation"
           />
-        </Field>
-        <Field label="Location">
+        </FieldLabel>
+        <FieldLabel label="When recorded">
           <input
-            type="text"
+            type="datetime-local"
             className="input text-sm"
-            value={form.location}
+            value={form.recorded_at}
             onChange={(e) =>
-              setForm((f) => ({ ...f, location: e.target.value }))
+              setForm((f) => ({ ...f, recorded_at: e.target.value }))
             }
-            placeholder="e.g. Birmingham, AL"
           />
-        </Field>
-        <Field label="Gender">
-          <input
-            type="text"
-            className="input text-sm"
-            value={form.gender}
-            onChange={(e) => setForm((f) => ({ ...f, gender: e.target.value }))}
-          />
-        </Field>
-        <Field label="Age">
-          <input
-            type="text"
-            className="input text-sm"
-            value={form.age}
-            onChange={(e) => setForm((f) => ({ ...f, age: e.target.value }))}
-            placeholder="e.g. 47, early 60s, infant"
-          />
-        </Field>
+        </FieldLabel>
       </div>
-      <Field label="Visit history">
+      <FieldLabel label="Summary">
         <textarea
           className="input text-sm min-h-[60px]"
-          value={form.visit_history}
+          value={form.summary}
           onChange={(e) =>
-            setForm((f) => ({ ...f, visit_history: e.target.value }))
+            setForm((f) => ({ ...f, summary: e.target.value }))
           }
-          placeholder="Running log of when / how you've connected with this person."
+          placeholder="Short summary; future audio imports will auto-fill this with Claude."
         />
-      </Field>
-      <Field label="Notes">
+      </FieldLabel>
+      <FieldLabel label="Full transcript">
         <textarea
-          className="input text-sm min-h-[60px]"
-          value={form.notes}
-          onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))}
-          placeholder="Anything else worth remembering."
+          className="input text-sm min-h-[160px] font-mono"
+          value={form.transcript_text}
+          onChange={(e) =>
+            setForm((f) => ({ ...f, transcript_text: e.target.value }))
+          }
+          placeholder="Paste a transcript from Plaud / Google Recorder, or type one in directly."
         />
-      </Field>
+      </FieldLabel>
     </div>
   );
 
   return (
     <>
-      {!adding && (
-        <div className="flex justify-end">
+      <div className="flex justify-end">
+        {!adding && (
           <button
             type="button"
-            onClick={() => setAdding(true)}
+            onClick={() => {
+              setAddForm({
+                ...BLANK_FORM,
+                recorded_at: isoToLocal(new Date().toISOString()),
+              });
+              setAdding(true);
+            }}
             className="btn-secondary text-xs"
           >
-            + Add relative
+            + Add transcript
           </button>
-        </div>
-      )}
+        )}
+      </div>
 
       {error && (
         <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1">
@@ -217,7 +236,6 @@ export default function PersonExtendedFamily({ personId }) {
               type="button"
               onClick={() => {
                 setAdding(false);
-                setAddForm(BLANK_FORM);
                 setError(null);
               }}
               disabled={busy}
@@ -231,24 +249,21 @@ export default function PersonExtendedFamily({ personId }) {
               disabled={busy}
               className="btn-primary text-xs disabled:opacity-50"
             >
-              {busy ? 'Saving…' : 'Add relative'}
+              {busy ? 'Saving…' : 'Add transcript'}
             </button>
           </div>
         </div>
       )}
 
       {loading ? (
-        <p className="text-xs text-gray-500 italic">
-          Loading extended family…
-        </p>
+        <p className="text-xs text-gray-500 italic">Loading transcripts…</p>
       ) : items.length === 0 && !adding ? (
-        <p className="text-xs text-gray-500 italic">
-          No extended-family records yet.
-        </p>
+        <p className="text-xs text-gray-500 italic">No transcripts yet.</p>
       ) : (
         <ul className="divide-y divide-gray-200">
           {items.map((it) => {
             const isEditing = editingId === it.id;
+            const isExpanded = expandedId === it.id;
             return (
               <li key={it.id} className="py-3">
                 {isEditing ? (
@@ -276,15 +291,28 @@ export default function PersonExtendedFamily({ personId }) {
                 ) : (
                   <div className="space-y-1">
                     <div className="flex items-baseline justify-between gap-2 flex-wrap">
-                      <div className="text-sm font-medium text-gray-900">
-                        {it.name}
-                        {it.relationship && (
-                          <span className="ml-2 text-xs text-gray-500 italic font-normal">
-                            ({it.relationship})
-                          </span>
-                        )}
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium text-gray-900">
+                          {it.title || '(untitled transcript)'}
+                        </div>
+                        <div className="text-xs text-gray-500">
+                          {new Date(it.recorded_at).toLocaleString()}
+                          {it.source_type !== 'manual' && (
+                            <span className="ml-2 italic">
+                              (via {it.source_type})
+                            </span>
+                          )}
+                        </div>
                       </div>
                       <div className="flex gap-3 text-xs">
+                        <button
+                          type="button"
+                          onClick={() => handlePromote(it)}
+                          className="text-umc-700 hover:text-umc-900 underline"
+                          disabled={busy}
+                        >
+                          → Core issue
+                        </button>
                         <button
                           type="button"
                           onClick={() => startEdit(it)}
@@ -297,25 +325,36 @@ export default function PersonExtendedFamily({ personId }) {
                           onClick={() => handleDelete(it)}
                           className="text-red-600 hover:text-red-800 underline"
                         >
-                          Remove
+                          Delete
                         </button>
                       </div>
                     </div>
-                    <div className="text-xs text-gray-600 flex flex-wrap gap-x-3">
-                      {it.location && <span>{it.location}</span>}
-                      {it.gender && <span>{it.gender}</span>}
-                      {it.age && <span>age {it.age}</span>}
-                    </div>
-                    {it.visit_history && (
-                      <p className="text-xs text-gray-700 mt-1 whitespace-pre-wrap">
-                        <span className="font-semibold">Visits:</span>{' '}
-                        {it.visit_history}
+                    {it.summary && (
+                      <p className="text-xs text-gray-700 whitespace-pre-wrap mt-1">
+                        {it.summary}
                       </p>
                     )}
-                    {it.notes && (
-                      <p className="text-xs text-gray-700 mt-1 whitespace-pre-wrap">
-                        {it.notes}
-                      </p>
+                    {it.transcript_text && (
+                      <div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setExpandedId((e) =>
+                              e === it.id ? null : it.id
+                            )
+                          }
+                          className="text-[10px] text-gray-500 hover:text-gray-800 underline mt-1"
+                        >
+                          {isExpanded
+                            ? '▴ Hide transcript'
+                            : '▾ Show full transcript'}
+                        </button>
+                        {isExpanded && (
+                          <pre className="text-[11px] text-gray-700 whitespace-pre-wrap font-mono mt-1 bg-gray-50 border border-gray-200 rounded p-2 max-h-96 overflow-y-auto">
+                            {it.transcript_text}
+                          </pre>
+                        )}
+                      </div>
                     )}
                   </div>
                 )}
@@ -328,7 +367,7 @@ export default function PersonExtendedFamily({ personId }) {
   );
 }
 
-function Field({ label, children }) {
+function FieldLabel({ label, children }) {
   return (
     <div>
       <label className="text-[10px] uppercase tracking-wide text-gray-500 block mb-1">

@@ -1,9 +1,15 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import LoadingSpinner from '../components/LoadingSpinner.jsx';
+import CollapsibleSection from '../components/CollapsibleSection.jsx';
 import PersonPhotos from '../components/PersonPhotos.jsx';
 import PersonFamilyLinks from '../components/PersonFamilyLinks.jsx';
 import PersonExtendedFamily from '../components/PersonExtendedFamily.jsx';
+import PersonInteractions from '../components/PersonInteractions.jsx';
+import PersonTranscripts from '../components/PersonTranscripts.jsx';
+import PersonNotes from '../components/PersonNotes.jsx';
+import PersonCoreIssues from '../components/PersonCoreIssues.jsx';
+import PersonPrayerRequests from '../components/PersonPrayerRequests.jsx';
 import {
   deletePerson,
   fullName,
@@ -26,6 +32,11 @@ export default function PersonDetail() {
   const [savedAt, setSavedAt] = useState(null);
   const [saved, setSaved] = useState(null);
   const [draft, setDraft] = useState(null);
+
+  // Ref the Core Issues section so the interaction / transcript / note
+  // components can ask it to refresh after promoting a new issue.
+  const coreIssuesRef = useRef(null);
+  const refreshCoreIssues = () => coreIssuesRef.current?.refresh();
 
   const load = async () => {
     setLoading(true);
@@ -140,7 +151,7 @@ export default function PersonDetail() {
         </p>
       )}
 
-      <Section title="Identity">
+      <Section title="Identity" defaultOpen={true}>
         <Grid>
           <Field label="First name *">
             <input
@@ -177,9 +188,11 @@ export default function PersonDetail() {
         </Grid>
       </Section>
 
-      <PersonPhotos personId={id} />
+      <Section title="Photos" defaultOpen={true}>
+        <PersonPhotos personId={id} />
+      </Section>
 
-      <Section title="Contact">
+      <Section title="Contact" defaultOpen={true}>
         <Grid>
           <Field label="Cell phone">
             <input
@@ -322,7 +335,7 @@ export default function PersonDetail() {
         )}
       </Section>
 
-      <Section title="Status">
+      <Section title="Status" defaultOpen={true}>
         <div className="flex flex-col sm:flex-row sm:flex-wrap gap-3">
           <Toggle
             label="Church member"
@@ -440,9 +453,33 @@ export default function PersonDetail() {
         />
       </Section>
 
-      <PersonFamilyLinks personId={id} />
+      <Section title="Pastoral interactions">
+        <PersonInteractions personId={id} onChanged={refreshCoreIssues} />
+      </Section>
 
-      <PersonExtendedFamily personId={id} />
+      <Section title="Conversation transcripts">
+        <PersonTranscripts personId={id} onChanged={refreshCoreIssues} />
+      </Section>
+
+      <Section title="Pastoral notes log">
+        <PersonNotes personId={id} onChanged={refreshCoreIssues} />
+      </Section>
+
+      <Section title="Core pastoral issues" defaultOpen={true}>
+        <PersonCoreIssues personId={id} ref={coreIssuesRef} />
+      </Section>
+
+      <Section title="Prayer requests (made by / for)">
+        <PersonPrayerRequests person={saved} />
+      </Section>
+
+      <Section title="Family (in directory)">
+        <PersonFamilyLinks personId={id} />
+      </Section>
+
+      <Section title="Extended family (not in directory)">
+        <PersonExtendedFamily personId={id} />
+      </Section>
 
       <Section title="Deceased">
         <label className="inline-flex items-center gap-2 text-sm cursor-pointer">
@@ -606,12 +643,24 @@ function ChurchRolesEditor({ roles, onChange }) {
 
 // --- Layout helpers --------------------------------------------------
 
-function Section({ title, children }) {
+// Local Section helper forwards to CollapsibleSection, deriving a
+// per-section storageKey from the title so open/closed state survives
+// page reloads. defaultOpen defaults to false (most sections collapse);
+// the call site passes defaultOpen={true} for the few that should
+// start expanded.
+function Section({ title, defaultOpen = false, badge, children }) {
+  const storageKey = `pastoral.section.${title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')}.open`;
   return (
-    <section className="card space-y-3">
-      <h2 className="font-serif text-lg text-umc-900">{title}</h2>
-      <div>{children}</div>
-    </section>
+    <CollapsibleSection
+      title={title}
+      defaultOpen={defaultOpen}
+      storageKey={storageKey}
+      badge={badge}
+    >
+      {children}
+    </CollapsibleSection>
   );
 }
 
