@@ -248,3 +248,64 @@ export async function suggestCoreIssues({
       rationale: typeof s.rationale === 'string' ? s.rationale.trim() : '',
     }));
 }
+
+// =====================================================================
+// Phase 6 — Draft a eulogy outline from gathered pastoral data
+// =====================================================================
+//
+// Takes a payload assembled by the EulogyDraftModal (already filtered
+// to the sections the pastor wants to include) and asks Claude to
+// produce a chronological outline of the person's life suitable as
+// a starting point for a eulogy. Pastor edits the result before it
+// lands in eulogy_notes.
+//
+// The data gathering happens client-side; this function just sends
+// the assembled context to Claude.
+
+export async function draftEulogyOutline({ personLabel, sectionsContext }) {
+  const text = (sectionsContext || '').trim();
+  if (!text) {
+    throw new Error(
+      'No source data selected. Pick at least one section to include.'
+    );
+  }
+  const result = await callClaude({
+    system:
+      'You are helping a United Methodist pastor write a eulogy outline. ' +
+      'You will receive a parishioner\'s pastoral record, organized by section. ' +
+      'Produce a thoughtful, chronological outline of their life — the kind a ' +
+      'pastor could turn into a 5-10 minute eulogy with a few hours of reflection. ' +
+      '\n\nSTRUCTURE the outline this way (skip any section the data doesn\'t support):\n' +
+      '  ## Early life and family of origin\n' +
+      '  ## Faith journey\n' +
+      '  ## Marriage, family, vocation\n' +
+      '  ## Life in the church and community\n' +
+      '  ## Final season\n' +
+      '  ## Hopes for the resurrection / words for the family\n' +
+      '\nUNDER each heading, use bullet points with concrete facts and notable moments. ' +
+      'When the data has a date, INCLUDE it. When the pastor\'s notes describe a ' +
+      'meaningful moment, summarize it in the person\'s own framing. ' +
+      '\nMARK uncertainty: when a fact would normally appear (date of birth, place, ' +
+      'parents\' names, etc.) but isn\'t in the record, include a placeholder like ' +
+      '"[date of birth — to confirm with family]" so the pastor knows what to fill in. ' +
+      '\nTONE: warm but factual. This is a draft for the pastor\'s eyes — they will ' +
+      'add the theological framing, the personal stories, the pastoral voice. Don\'t ' +
+      'add your own theological commentary. Don\'t include items the data marked ' +
+      'rejected, private, or not for the eulogy. ' +
+      '\nOutput plain markdown. No preamble, no closing remarks — just the outline.',
+    messages: [
+      {
+        role: 'user',
+        content:
+          (personLabel ? `Person: ${personLabel}\n\n` : '') +
+          'Pastoral record:\n\n' +
+          text,
+      },
+    ],
+    max_tokens: 4000,
+    timeoutMs: 90000, // synthesis is the slowest call we make
+  });
+  const outline = firstText(result);
+  if (!outline) throw new Error('Claude returned no outline.');
+  return outline;
+}

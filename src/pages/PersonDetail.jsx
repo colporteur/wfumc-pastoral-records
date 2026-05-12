@@ -12,6 +12,8 @@ import PersonCoreIssues from '../components/PersonCoreIssues.jsx';
 import PersonPrayerRequests from '../components/PersonPrayerRequests.jsx';
 import PersonPets from '../components/PersonPets.jsx';
 import PersonSignificantDeaths from '../components/PersonSignificantDeaths.jsx';
+import ObituaryUpload from '../components/ObituaryUpload.jsx';
+import EulogyDraftModal from '../components/EulogyDraftModal.jsx';
 import {
   deletePerson,
   fullName,
@@ -39,6 +41,11 @@ export default function PersonDetail() {
   // components can ask it to refresh after promoting a new issue.
   const coreIssuesRef = useRef(null);
   const refreshCoreIssues = () => coreIssuesRef.current?.refresh();
+
+  // Eulogy-draft modal open state — pulled into the page so the modal
+  // can live at the page root rather than inside the (collapsible)
+  // End-of-life section.
+  const [eulogyOpen, setEulogyOpen] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -507,21 +514,63 @@ export default function PersonDetail() {
         <PersonSignificantDeaths personId={id} />
       </Section>
 
-      <Section title="Deceased">
-        <label className="inline-flex items-center gap-2 text-sm cursor-pointer">
-          <input
-            type="checkbox"
-            checked={draft.is_deceased}
-            onChange={(e) => update('is_deceased', e.target.checked)}
-            className="rounded border-gray-300"
+      <Section title="End of life & eulogy">
+        <Toggle
+          label="Mark as deceased"
+          checked={draft.is_deceased}
+          onChange={(v) => update('is_deceased', v)}
+        />
+        {draft.is_deceased && (
+          <div className="mt-3 pt-3 border-t border-gray-200 space-y-3">
+            <Grid>
+              <Field label="Date of death">
+                <input
+                  type="date"
+                  className="input"
+                  value={draft.death_date}
+                  onChange={(e) => update('death_date', e.target.value)}
+                />
+              </Field>
+              <Field label="Obituary link (URL)">
+                <input
+                  type="url"
+                  className="input"
+                  value={draft.obituary_url}
+                  onChange={(e) => update('obituary_url', e.target.value)}
+                  placeholder="https://funeralhome.example.com/obit/..."
+                />
+              </Field>
+            </Grid>
+            <div>
+              <label className="label">Obituary file</label>
+              <ObituaryUpload
+                personId={id}
+                value={draft.obituary_storage_path || null}
+                onChange={(path) => update('obituary_storage_path', path)}
+              />
+            </div>
+          </div>
+        )}
+
+        <div className="mt-4 pt-3 border-t border-gray-200">
+          <div className="flex items-baseline justify-between mb-1 flex-wrap gap-2">
+            <label className="label mb-0">Eulogy notes</label>
+            <button
+              type="button"
+              onClick={() => setEulogyOpen(true)}
+              className="text-xs text-umc-700 hover:text-umc-900 underline"
+              title="Ask Claude to draft a chronological eulogy outline from this person's pastoral record"
+            >
+              ✨ Draft eulogy outline with Claude
+            </button>
+          </div>
+          <textarea
+            className="input min-h-[140px] font-serif text-sm leading-relaxed"
+            value={draft.eulogy_notes}
+            onChange={(e) => update('eulogy_notes', e.target.value)}
+            placeholder="Running notes for a future eulogy. Editable any time. Claude can append a chronological outline assembled from the rest of the record — you stay in control of what reaches the pulpit."
           />
-          Mark as deceased
-        </label>
-        <p className="text-xs text-gray-500 mt-1">
-          A future phase will add the full end-of-life workflow (death
-          date, obituary upload, eulogy notes, eulogy synthesis tool). For
-          now this just hides the person from default list views.
-        </p>
+        </div>
       </Section>
 
       <div className="flex items-center justify-between pt-4 border-t border-gray-200">
@@ -541,6 +590,20 @@ export default function PersonDetail() {
           {saving ? 'Saving…' : 'Save changes'}
         </button>
       </div>
+
+      <EulogyDraftModal
+        open={eulogyOpen}
+        onClose={() => setEulogyOpen(false)}
+        person={saved}
+        onAccept={async (newNotes) => {
+          // Persist directly + reflect in the live draft so the textarea
+          // shows the appended outline immediately.
+          const updated = await updatePerson(id, { eulogy_notes: newNotes });
+          setSaved(updated);
+          setDraft((d) => ({ ...d, eulogy_notes: newNotes }));
+          setSavedAt(new Date());
+        }}
+      />
     </div>
   );
 }
@@ -786,9 +849,11 @@ const TEXT_FIELDS = [
   'secondary_address_line1', 'secondary_address_line2',
   'secondary_city', 'secondary_state', 'secondary_zip',
   'notes', 'faith_background',
+  'obituary_url', 'obituary_storage_path', 'eulogy_notes',
 ];
 const DATE_FIELDS = [
   'birthdate', 'anniversary', 'baptism_date', 'date_joined_church',
+  'death_date',
 ];
 const BOOL_FIELDS = [
   'is_church_member', 'is_active_visitor', 'is_extended_family',

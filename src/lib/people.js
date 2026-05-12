@@ -68,6 +68,10 @@ const ALLOWED_FIELDS = [
   'is_deceased',
   'faith_background',
   'personal_preferences',
+  'death_date',
+  'obituary_url',
+  'obituary_storage_path',
+  'eulogy_notes',
 ];
 
 // Filter a patch object down to only fields we recognize. Empty strings
@@ -81,7 +85,8 @@ function normalizePatch(patch) {
       (k === 'birthdate' ||
         k === 'anniversary' ||
         k === 'baptism_date' ||
-        k === 'date_joined_church') &&
+        k === 'date_joined_church' ||
+        k === 'death_date') &&
       typeof v === 'string' &&
       v.trim() === ''
     ) {
