@@ -72,6 +72,8 @@ const ALLOWED_FIELDS = [
   'obituary_url',
   'obituary_storage_path',
   'eulogy_notes',
+  'external_source',
+  'external_id',
 ];
 
 // Filter a patch object down to only fields we recognize. Empty strings
@@ -177,4 +179,87 @@ export async function deletePerson(id) {
     supabase.from('pastoral_people').delete().eq('id', id)
   );
   if (error) throw error;
+}
+
+// Idempotent upsert keyed on (owner_user_id, external_source, external_id).
+// Used by the directory importer so re-runs don't create duplicates. If a
+// row with the same triple already exists, this updates it; otherwise inserts.
+export async function upsertPersonByExternalId({
+  ownerUserId,
+  externalSource,
+  externalId,
+  patch,
+}) {
+  if (!ownerUserId) throw new Error('Missing user.');
+  if (!externalSource || !externalId)
+    throw new Error('Missing external_source / external_id.');
+  if (!patch?.first_name?.trim()) throw new Error('First name is required.');
+  // Look up existing row first.
+  const { data: existing, error: lookupErr } = await withTimeout(
+    supabase
+      .from('pastoral_people')
+      .select('id')
+      .eq('owner_user_id', ownerUserId)
+      .eq('external_source', externalSource)
+      .eq('external_id', externalId)
+      .maybeSingle()
+  );
+  if (lookupErr) throw lookupErr;
+  if (existing) {
+    // Update path — preserve the row's id and any pastoral-only fields
+    // the directory doesn't know about (notes, faith_background, etc.).
+    const { data, error } = await withTimeout(
+      supabase
+        .from('pastoral_people')
+        .update({
+          ...normalizePatchFields(patch),
+          external_source: externalSource,
+          external_id: externalId,
+        })
+        .eq('id', existing.id)
+        .select('*')
+        .single()
+    );
+    if (error) throw error;
+    return { row: data, action: 'updated' };
+  }
+  // Insert path.
+  const { data, error } = await withTimeout(
+    supabase
+      .from('pastoral_people')
+      .insert({
+        owner_user_id: ownerUserId,
+        external_source: externalSource,
+        external_id: externalId,
+        ...normalizePatchFields(patch),
+      })
+      .select('*')
+      .single()
+  );
+  if (error) throw error;
+  return { row: data, action: 'created' };
+}
+
+// Re-export the same field-allowlist normalizer used by createPerson /
+// updatePerson, so the upsert path stays consistent.
+function normalizePatchFields(patch) {
+  const out = {};
+  for (const k of ALLOWED_FIELDS) {
+    if (patch[k] === undefined) continue;
+    let v = patch[k];
+    if (
+      (k === 'birthdate' ||
+        k === 'anniversary' ||
+        k === 'baptism_date' ||
+        k === 'date_joined_church' ||
+        k === 'death_date') &&
+      typeof v === 'string' &&
+      v.trim() === ''
+    ) {
+      v = null;
+    }
+    if (typeof v === 'string') v = v.trim() || null;
+    out[k] = v;
+  }
+  return out;
 }

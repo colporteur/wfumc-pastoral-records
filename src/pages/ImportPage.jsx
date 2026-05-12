@@ -1,80 +1,120 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext.jsx';
-import { createPerson } from '../lib/people';
+import { upsertPersonByExternalId } from '../lib/people';
+import {
+  buildImportPatches,
+  summarizeExport,
+} from '../lib/icdImport';
 
-// Phase 1 stub for the directory-import flow. Accepts pasted CSV text
-// with a fixed header set so the pastor can move data over from the
-// church's online directory (manually copy/paste the table for now;
-// proper scraping integration comes in a later phase).
+// Import flow for the Instant Church Directory JSON file produced by
+// the in-browser extractor. Two phases:
 //
-// CSV header expected (first row): first_name,last_name,email,cell_phone
-//
-// Each row creates one pastoral_people record. Empty cells are OK.
-
-const EXPECTED_HEADER = ['first_name', 'last_name', 'email', 'cell_phone'];
+//   1. PREVIEW — drag/drop or pick a JSON file. We parse it client-side,
+//      build the patches, show the pastor what would be created vs
+//      updated, and let them confirm.
+//   2. COMMIT — iterate the patches and call upsertPersonByExternalId
+//      for each. Idempotent: re-running the same export updates rows
+//      in place rather than duplicating.
 
 export default function ImportPage() {
   const { user } = useAuth();
-  const [csvText, setCsvText] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState(null);
-  const [error, setError] = useState(null);
+  const fileInputRef = useRef(null);
 
-  const handleImport = async () => {
-    if (!user?.id) return;
-    if (!csvText.trim()) {
-      setError('Paste some CSV text first.');
+  const [exportBlob, setExportBlob] = useState(null);
+  const [filename, setFilename] = useState('');
+  const [parseError, setParseError] = useState(null);
+
+  const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState({ done: 0, total: 0 });
+  const [result, setResult] = useState(null);
+  const [errors, setErrors] = useState([]);
+
+  const summary = exportBlob ? summarizeExport(exportBlob) : null;
+
+  const handleFiles = (files) => {
+    setParseError(null);
+    setResult(null);
+    setErrors([]);
+    if (!files || files.length === 0) return;
+    const file = files[0];
+    setFilename(file.name);
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const json = JSON.parse(String(reader.result || ''));
+        if (json.source !== 'instantchurchdirectory.com') {
+          throw new Error(
+            'This doesn\'t look like an Instant Church Directory export. ' +
+              'Expected source=\'instantchurchdirectory.com\' in the JSON.'
+          );
+        }
+        if (!Array.isArray(json.records)) {
+          throw new Error('JSON is missing the `records` array.');
+        }
+        setExportBlob(json);
+      } catch (e) {
+        setExportBlob(null);
+        setParseError(e.message || String(e));
+      }
+    };
+    reader.onerror = () => setParseError('Could not read file.');
+    reader.readAsText(file);
+  };
+
+  const handleCommit = async () => {
+    if (!exportBlob || !user?.id) return;
+    const patches = buildImportPatches(exportBlob);
+    if (patches.length === 0) {
+      setParseError('No importable people found in this file.');
       return;
     }
-    setBusy(true);
-    setError(null);
-    setResult(null);
-    try {
-      const rows = parseCsv(csvText);
-      if (rows.length === 0) {
-        throw new Error('No data rows found in the pasted text.');
-      }
-      const header = rows[0].map((c) => c.trim().toLowerCase());
-      const headerOk = EXPECTED_HEADER.every((h) => header.includes(h));
-      if (!headerOk) {
-        throw new Error(
-          `First row must include the columns: ${EXPECTED_HEADER.join(', ')}.\n` +
-            `Found: ${header.join(', ')}`
+    setRunning(true);
+    setProgress({ done: 0, total: patches.length });
+    setErrors([]);
+    const tally = { created: 0, updated: 0, failed: 0 };
+    for (let i = 0; i < patches.length; i++) {
+      const { externalSource, externalId, patch, person } = patches[i];
+      try {
+        const { action } = await upsertPersonByExternalId({
+          ownerUserId: user.id,
+          externalSource,
+          externalId,
+          patch,
+        });
+        if (action === 'created') tally.created++;
+        else tally.updated++;
+      } catch (e) {
+        tally.failed++;
+        setErrors((prev) =>
+          prev.length < 25
+            ? [
+                ...prev,
+                {
+                  who:
+                    `${person?.firstName || ''} ${
+                      person?.familyLastName || ''
+                    }`.trim() || externalId,
+                  error: e.message || String(e),
+                },
+              ]
+            : prev
         );
       }
-      const idx = Object.fromEntries(
-        EXPECTED_HEADER.map((k) => [k, header.indexOf(k)])
-      );
-      const created = [];
-      const failed = [];
-      for (let i = 1; i < rows.length; i++) {
-        const r = rows[i];
-        if (r.every((c) => !c || !c.trim())) continue;
-        const patch = {
-          first_name: pickCell(r, idx.first_name),
-          last_name: pickCell(r, idx.last_name),
-          email: pickCell(r, idx.email),
-          cell_phone: pickCell(r, idx.cell_phone),
-        };
-        if (!patch.first_name) {
-          failed.push({ row: i + 1, reason: 'No first name' });
-          continue;
-        }
-        try {
-          await createPerson({ ownerUserId: user.id, patch });
-          created.push(patch);
-        } catch (e) {
-          failed.push({ row: i + 1, reason: e.message || String(e) });
-        }
-      }
-      setResult({ created: created.length, failed });
-      if (created.length > 0) setCsvText('');
-    } catch (e) {
-      setError(e.message || String(e));
-    } finally {
-      setBusy(false);
+      setProgress({ done: i + 1, total: patches.length });
     }
+    setResult(tally);
+    setRunning(false);
+  };
+
+  const reset = () => {
+    setExportBlob(null);
+    setFilename('');
+    setParseError(null);
+    setResult(null);
+    setErrors([]);
+    setProgress({ done: 0, total: 0 });
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   return (
@@ -90,123 +130,175 @@ export default function ImportPage() {
           Import directory
         </h1>
         <p className="text-sm text-gray-600 mt-1">
-          Paste CSV text below to bulk-create pastoral records. The first
-          row must be the header line; expected columns:{' '}
-          <code className="text-xs bg-gray-100 px-1 rounded">
-            {EXPECTED_HEADER.join(', ')}
-          </code>
-          . Extra columns are ignored.
-        </p>
-        <p className="text-xs text-gray-500 mt-1">
-          A future phase will add a proper church-directory scraper /
-          field-mapper. For now this is the manual paste path.
+          Upload an Instant Church Directory export — the JSON file
+          produced by running the extractor in your browser on
+          members.instantchurchdirectory.com. Each person becomes a
+          pastoral record. Re-running the same import is safe — rows
+          update in place rather than duplicating.
         </p>
       </div>
 
-      {error && (
-        <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded px-3 py-2 whitespace-pre-wrap">
-          {error}
+      {parseError && (
+        <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded px-3 py-2">
+          {parseError}
         </p>
       )}
 
-      <div className="card space-y-3">
-        <textarea
-          className="input min-h-[240px] font-mono text-xs"
-          value={csvText}
-          onChange={(e) => setCsvText(e.target.value)}
-          placeholder={`first_name,last_name,email,cell_phone\nJohn,Smith,john@example.com,555-555-1234\nJane,Doe,jane@example.com,`}
-        />
-        <div className="flex justify-end">
+      {!exportBlob && !result && (
+        <div className="card text-center space-y-3">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json,application/json"
+            className="hidden"
+            onChange={(e) => handleFiles(e.target.files)}
+          />
           <button
             type="button"
-            onClick={handleImport}
-            disabled={busy || !csvText.trim()}
-            className="btn-primary text-sm disabled:opacity-50"
+            onClick={() => fileInputRef.current?.click()}
+            className="btn-primary"
           >
-            {busy ? 'Importing…' : 'Import rows'}
+            📄 Pick JSON file
           </button>
-        </div>
-      </div>
-
-      {result && (
-        <div className="card text-sm space-y-2">
-          <p className="text-green-700">
-            ✓ Imported {result.created} record{result.created === 1 ? '' : 's'}.
+          <p className="text-xs text-gray-500">
+            Look for{' '}
+            <code className="bg-gray-100 px-1 rounded">
+              icd-export-YYYY-MM-DD.json
+            </code>{' '}
+            in your Downloads folder.
           </p>
-          {result.failed.length > 0 && (
-            <div>
-              <p className="text-red-700">
-                {result.failed.length} row{result.failed.length === 1 ? '' : 's'}{' '}
-                failed:
-              </p>
-              <ul className="list-disc pl-6 text-xs text-gray-700 mt-1">
-                {result.failed.slice(0, 20).map((f, i) => (
-                  <li key={i}>
-                    Row {f.row}: {f.reason}
-                  </li>
-                ))}
-                {result.failed.length > 20 && (
-                  <li>… and {result.failed.length - 20} more</li>
-                )}
-              </ul>
-            </div>
-          )}
-          <Link to="/people" className="btn-secondary text-sm inline-block">
-            View people
-          </Link>
         </div>
       )}
+
+      {exportBlob && !result && (
+        <>
+          <div className="card space-y-2">
+            <h2 className="font-serif text-lg text-umc-900">
+              Preview: {filename}
+            </h2>
+            <ul className="text-sm text-gray-700 space-y-1">
+              <li>Source: {summary.source}</li>
+              <li>Extracted: {new Date(summary.extractedAt).toLocaleString()}</li>
+              <li>
+                <strong>{summary.familyCount}</strong> families,{' '}
+                <strong>{summary.personCount}</strong> people
+              </li>
+            </ul>
+            <p className="text-xs text-gray-500">
+              Each person will be upserted by their ICD personId. Re-runs
+              update rows in place — no duplicates. Pastoral fields you've
+              added (notes, faith background, eulogy notes, etc.) are
+              preserved on update.
+            </p>
+          </div>
+
+          {running ? (
+            <div className="card text-center">
+              <p className="text-sm text-gray-700">
+                Importing… {progress.done} / {progress.total}
+              </p>
+              <div className="w-full bg-gray-200 rounded h-2 mt-2">
+                <div
+                  className="bg-umc-700 h-2 rounded"
+                  style={{
+                    width: `${
+                      progress.total > 0
+                        ? Math.round((progress.done / progress.total) * 100)
+                        : 0
+                    }%`,
+                  }}
+                />
+              </div>
+            </div>
+          ) : (
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={reset}
+                className="btn-secondary text-sm"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleCommit}
+                className="btn-primary text-sm"
+              >
+                Run import ({summary.personCount} people)
+              </button>
+            </div>
+          )}
+        </>
+      )}
+
+      {result && (
+        <div className="card space-y-3">
+          <h2 className="font-serif text-lg text-umc-900">Import complete</h2>
+          <ul className="text-sm space-y-1">
+            <li className="text-green-700">
+              ✓ Created: <strong>{result.created}</strong>
+            </li>
+            <li className="text-blue-700">
+              ↻ Updated: <strong>{result.updated}</strong>
+            </li>
+            {result.failed > 0 && (
+              <li className="text-red-700">
+                ⚠ Failed: <strong>{result.failed}</strong>
+              </li>
+            )}
+          </ul>
+          {errors.length > 0 && (
+            <details className="text-xs text-gray-700 mt-2">
+              <summary className="cursor-pointer text-red-700">
+                Show {errors.length} error{errors.length === 1 ? '' : 's'}
+              </summary>
+              <ul className="list-disc pl-6 mt-1 space-y-0.5">
+                {errors.map((e, i) => (
+                  <li key={i}>
+                    <strong>{e.who}:</strong> {e.error}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+          <div className="flex justify-end gap-2 pt-2">
+            <Link to="/people" className="btn-secondary text-sm">
+              View people
+            </Link>
+            <button type="button" onClick={reset} className="btn-primary text-sm">
+              Import another file
+            </button>
+          </div>
+        </div>
+      )}
+
+      <details className="text-xs text-gray-500 mt-6">
+        <summary className="cursor-pointer hover:text-gray-700">
+          How to produce the JSON file
+        </summary>
+        <ol className="list-decimal pl-6 mt-2 space-y-1">
+          <li>
+            Sign in to{' '}
+            <code className="bg-gray-100 px-1 rounded">
+              members.instantchurchdirectory.com
+            </code>{' '}
+            and open the Families page.
+          </li>
+          <li>Open DevTools (F12) → Console tab.</li>
+          <li>
+            Paste the in-browser extractor snippet (see the project
+            README) and press Enter. Wait ~10 seconds.
+          </li>
+          <li>
+            A file named{' '}
+            <code className="bg-gray-100 px-1 rounded">
+              icd-export-YYYY-MM-DD.json
+            </code>{' '}
+            will download to your Downloads folder.
+          </li>
+          <li>Come back here and pick that file.</li>
+        </ol>
+      </details>
     </div>
   );
-}
-
-function pickCell(row, idx) {
-  if (idx === undefined || idx < 0) return '';
-  return (row[idx] || '').trim();
-}
-
-// Tiny CSV parser. Handles quoted fields with commas inside; assumes \n
-// or \r\n line endings. Doesn't handle escaped quotes in fields perfectly
-// but is good enough for a directory paste.
-function parseCsv(text) {
-  const rows = [];
-  let row = [];
-  let cell = '';
-  let inQuotes = false;
-  const src = text.replace(/\r\n/g, '\n');
-  for (let i = 0; i < src.length; i++) {
-    const ch = src[i];
-    if (inQuotes) {
-      if (ch === '"') {
-        if (src[i + 1] === '"') {
-          cell += '"';
-          i++;
-        } else {
-          inQuotes = false;
-        }
-      } else {
-        cell += ch;
-      }
-    } else {
-      if (ch === '"') {
-        inQuotes = true;
-      } else if (ch === ',') {
-        row.push(cell);
-        cell = '';
-      } else if (ch === '\n') {
-        row.push(cell);
-        rows.push(row);
-        row = [];
-        cell = '';
-      } else {
-        cell += ch;
-      }
-    }
-  }
-  // Flush any trailing cell / row.
-  if (cell.length > 0 || row.length > 0) {
-    row.push(cell);
-    rows.push(row);
-  }
-  return rows;
 }
