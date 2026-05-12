@@ -10,6 +10,8 @@ import PersonTranscripts from '../components/PersonTranscripts.jsx';
 import PersonNotes from '../components/PersonNotes.jsx';
 import PersonCoreIssues from '../components/PersonCoreIssues.jsx';
 import PersonPrayerRequests from '../components/PersonPrayerRequests.jsx';
+import PersonPets from '../components/PersonPets.jsx';
+import PersonSignificantDeaths from '../components/PersonSignificantDeaths.jsx';
 import {
   deletePerson,
   fullName,
@@ -416,6 +418,15 @@ export default function PersonDetail() {
         </div>
       </Section>
 
+      <Section title="Faith background">
+        <textarea
+          className="input min-h-[140px] font-serif text-sm leading-relaxed"
+          value={draft.faith_background}
+          onChange={(e) => update('faith_background', e.target.value)}
+          placeholder="Their faith journey — tradition, formative experiences, current questions, anything pastorally useful to remember about how they came to faith and where they are now."
+        />
+      </Section>
+
       <Section title="Personal dates">
         <Grid>
           <Field label="Birthdate">
@@ -449,7 +460,18 @@ export default function PersonDetail() {
           className="input min-h-[120px] font-serif text-sm leading-relaxed"
           value={draft.notes}
           onChange={(e) => update('notes', e.target.value)}
-          placeholder="Anything else worth remembering. (Pastoral interaction logs, prayer requests, eulogy notes, and core issues will get their own dedicated sections in later phases.)"
+          placeholder="Anything else worth remembering."
+        />
+      </Section>
+
+      <Section title="Pets">
+        <PersonPets personId={id} />
+      </Section>
+
+      <Section title="Personal preferences">
+        <PersonalPreferencesEditor
+          items={draft.personal_preferences}
+          onChange={(p) => update('personal_preferences', p)}
         />
       </Section>
 
@@ -479,6 +501,10 @@ export default function PersonDetail() {
 
       <Section title="Extended family (not in directory)">
         <PersonExtendedFamily personId={id} />
+      </Section>
+
+      <Section title="Significant deceased relationships">
+        <PersonSignificantDeaths personId={id} />
       </Section>
 
       <Section title="Deceased">
@@ -520,6 +546,64 @@ export default function PersonDetail() {
 }
 
 // --- Sub-editors ----------------------------------------------------
+
+function PersonalPreferencesEditor({ items, onChange }) {
+  const list = Array.isArray(items) ? items : [];
+  const update = (i, k, v) =>
+    onChange(list.map((p, j) => (i === j ? { ...p, [k]: v } : p)));
+  const add = () => onChange([...list, { label: '', value: '' }]);
+  const remove = (i) => onChange(list.filter((_, j) => j !== i));
+
+  return (
+    <div>
+      <div className="flex items-baseline justify-between mb-1">
+        <span className="text-xs text-gray-500">
+          Free-form key/value list (favorite Bible verse, comfort hymn,
+          go-to coffee order, etc.)
+        </span>
+        <button
+          type="button"
+          onClick={add}
+          className="text-xs text-umc-700 hover:text-umc-900 underline"
+        >
+          + Add preference
+        </button>
+      </div>
+      {list.length === 0 ? (
+        <p className="text-xs text-gray-500 italic">No preferences recorded.</p>
+      ) : (
+        <ul className="space-y-2">
+          {list.map((p, i) => (
+            <li key={i} className="flex items-center gap-2">
+              <input
+                type="text"
+                placeholder="Label (e.g., Favorite Bible verse)"
+                className="input text-sm flex-shrink-0"
+                style={{ width: '14rem' }}
+                value={p.label || ''}
+                onChange={(e) => update(i, 'label', e.target.value)}
+              />
+              <input
+                type="text"
+                placeholder="Value (e.g., Psalm 23)"
+                className="input text-sm flex-1"
+                value={p.value || ''}
+                onChange={(e) => update(i, 'value', e.target.value)}
+              />
+              <button
+                type="button"
+                onClick={() => remove(i)}
+                className="text-xs text-red-600 hover:text-red-800 underline whitespace-nowrap"
+              >
+                Remove
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 function SocialMediaEditor({ profiles, onChange }) {
   const list = Array.isArray(profiles) ? profiles : [];
@@ -701,7 +785,7 @@ const TEXT_FIELDS = [
   'address_line1', 'address_line2', 'city', 'state', 'zip',
   'secondary_address_line1', 'secondary_address_line2',
   'secondary_city', 'secondary_state', 'secondary_zip',
-  'notes',
+  'notes', 'faith_background',
 ];
 const DATE_FIELDS = [
   'birthdate', 'anniversary', 'baptism_date', 'date_joined_church',
@@ -722,13 +806,23 @@ function rowToDraft(row) {
   out.social_media_profiles = Array.isArray(row.social_media_profiles)
     ? row.social_media_profiles
     : [];
+  out.personal_preferences = Array.isArray(row.personal_preferences)
+    ? row.personal_preferences
+    : [];
   return out;
 }
 
 function draftToPatch(draft) {
-  // Strip empty social media rows so we don't persist {label:'', url:''} junk.
+  // Strip empty rows so we don't persist {label:'', url:''} junk.
   const profiles = (draft.social_media_profiles || []).filter(
     (p) => (p.label || '').trim() || (p.url || '').trim()
   );
-  return { ...draft, social_media_profiles: profiles };
+  const prefs = (draft.personal_preferences || []).filter(
+    (p) => (p.label || '').trim() || (p.value || '').trim()
+  );
+  return {
+    ...draft,
+    social_media_profiles: profiles,
+    personal_preferences: prefs,
+  };
 }

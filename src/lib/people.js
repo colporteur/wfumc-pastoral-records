@@ -66,6 +66,8 @@ const ALLOWED_FIELDS = [
   'on_christmas_card_list',
   'notes',
   'is_deceased',
+  'faith_background',
+  'personal_preferences',
 ];
 
 // Filter a patch object down to only fields we recognize. Empty strings
