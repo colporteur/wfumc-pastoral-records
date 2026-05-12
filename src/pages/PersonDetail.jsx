@@ -14,6 +14,7 @@ import PersonPets from '../components/PersonPets.jsx';
 import PersonSignificantDeaths from '../components/PersonSignificantDeaths.jsx';
 import ObituaryUpload from '../components/ObituaryUpload.jsx';
 import EulogyDraftModal from '../components/EulogyDraftModal.jsx';
+import PersonDocuments from '../components/PersonDocuments.jsx';
 import {
   deletePerson,
   fullName,
@@ -480,6 +481,10 @@ export default function PersonDetail() {
           items={draft.personal_preferences}
           onChange={(p) => update('personal_preferences', p)}
         />
+      </Section>
+
+      <Section title="Documents & screenshots">
+        <PersonDocuments person={saved} onChanged={refreshCoreIssues} />
       </Section>
 
       <Section title="Pastoral interactions">

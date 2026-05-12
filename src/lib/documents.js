@@ -61,3 +61,117 @@ export async function getSignedUrl(path) {
   if (error) throw error;
   return data?.signedUrl || null;
 }
+
+// Batch signed-URL fetch for many storage paths — same convenience
+// helper as fetchSignedUrls in lib/photos.js, scoped to this bucket.
+// Returns Map<path, signedUrl>.
+export async function fetchSignedUrls(paths) {
+  if (!paths || paths.length === 0) return new Map();
+  const { data, error } = await withTimeout(
+    supabase.storage.from(BUCKET).createSignedUrls(paths, SIGNED_URL_TTL_SECONDS)
+  );
+  if (error) throw error;
+  const out = new Map();
+  for (const r of data ?? []) {
+    if (r.path && r.signedUrl) out.set(r.path, r.signedUrl);
+  }
+  return out;
+}
+
+// =====================================================================
+// pastoral_documents table CRUD (Phase 7)
+// =====================================================================
+
+const DOC_ALLOWED = [
+  'kind',
+  'title',
+  'storage_path',
+  'url',
+  'body',
+  'notes',
+  'summary',
+  'content_type',
+  'original_filename',
+  'sort_order',
+];
+
+function normalizeDoc(patch) {
+  const out = {};
+  for (const k of DOC_ALLOWED) {
+    if (patch[k] === undefined) continue;
+    let v = patch[k];
+    if (typeof v === 'string') v = v.trim() || null;
+    out[k] = v;
+  }
+  return out;
+}
+
+export async function listDocuments(personId) {
+  if (!personId) return [];
+  const { data, error } = await withTimeout(
+    supabase
+      .from('pastoral_documents')
+      .select('*')
+      .eq('person_id', personId)
+      .order('created_at', { ascending: false })
+  );
+  if (error) throw error;
+  return data ?? [];
+}
+
+export async function createDocument({ ownerUserId, personId, patch }) {
+  if (!ownerUserId || !personId)
+    throw new Error('Missing user or person.');
+  const payload = {
+    owner_user_id: ownerUserId,
+    person_id: personId,
+    kind: 'file',
+    ...normalizeDoc(patch),
+  };
+  const { data, error } = await withTimeout(
+    supabase
+      .from('pastoral_documents')
+      .insert(payload)
+      .select('*')
+      .single()
+  );
+  if (error) throw error;
+  return data;
+}
+
+export async function updateDocument(id, patch) {
+  const { data, error } = await withTimeout(
+    supabase
+      .from('pastoral_documents')
+      .update(normalizeDoc(patch))
+      .eq('id', id)
+      .select('*')
+      .single()
+  );
+  if (error) throw error;
+  return data;
+}
+
+// Delete the metadata row AND clean up storage if there's a file attached.
+export async function deleteDocumentRow(doc) {
+  if (!doc?.id) throw new Error('Bad document row.');
+  if (doc.storage_path) {
+    try {
+      await deleteDocument(doc.storage_path);
+    } catch {
+      /* best-effort — surface only the metadata-delete error if any */
+    }
+  }
+  const { error } = await withTimeout(
+    supabase.from('pastoral_documents').delete().eq('id', doc.id)
+  );
+  if (error) throw error;
+}
+
+// Image-extension test so the gallery can render inline thumbnails.
+export function isImageDocument(doc) {
+  if (!doc) return false;
+  if (doc.content_type && doc.content_type.startsWith('image/')) return true;
+  const name = doc.original_filename || doc.storage_path || '';
+  return /\.(jpe?g|png|gif|webp|bmp|heic|heif)$/i.test(name);
+}

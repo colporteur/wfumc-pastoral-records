@@ -250,6 +250,50 @@ export async function suggestCoreIssues({
 }
 
 // =====================================================================
+// Phase 7 — Summarize a document
+// =====================================================================
+//
+// Pastor pasted a body, captured a link with metadata, or uploaded a
+// file — but we only have what's typeable as text. (We don't read
+// arbitrary files server-side; Phase 7 keeps it simple.) Claude
+// summarizes whatever text we can give it, in pastoral terms.
+//
+// `sourceText` should be: the doc body (for kind='note'), the doc's
+// existing pastor-typed notes (for files/links — Claude can't read
+// the file), or a short description the pastor gives.
+
+export async function summarizeDocument({ sourceText, personName, title }) {
+  const text = (sourceText || '').trim();
+  if (!text) throw new Error('No text to summarize.');
+  const ctx = [];
+  if (personName) ctx.push(`Person: ${personName}`);
+  if (title) ctx.push(`Document title: ${title}`);
+
+  const result = await callClaude({
+    system:
+      'You are helping a pastor maintain quick reference notes on documents and ' +
+      'artifacts attached to a parishioner\'s record. When given a document\'s text, ' +
+      'return ONLY a 1-3 sentence factual summary of what the document is and what ' +
+      'it says — the kind of summary the pastor would want to see in a list view ' +
+      'without re-reading the full document. Plain pastoral language. Do NOT add ' +
+      'theological commentary or emotional editorializing. Plain text, no markdown.',
+    messages: [
+      {
+        role: 'user',
+        content:
+          (ctx.length > 0 ? ctx.join('\n') + '\n\n' : '') +
+          'Document text / description:\n' +
+          text,
+      },
+    ],
+    max_tokens: 400,
+  });
+  const summary = firstText(result);
+  if (!summary) throw new Error('Claude returned no summary.');
+  return summary;
+}
+
+// =====================================================================
 // Phase 6 — Draft a eulogy outline from gathered pastoral data
 // =====================================================================
 //

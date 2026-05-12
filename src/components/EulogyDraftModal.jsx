@@ -15,6 +15,7 @@ import { listNotes } from '../lib/notesLog';
 import { listCoreIssues } from '../lib/coreIssues';
 import { listLinks as listPrayerLinks } from '../lib/prayerRequests';
 import { getPerson } from '../lib/people';
+import { listDocuments } from '../lib/documents';
 
 // Eulogy synthesis tool. Pastor picks which sections of the pastoral
 // record to feed into Claude (all on by default). Claude returns a
@@ -35,6 +36,7 @@ const SECTIONS = [
   { key: 'notes', label: 'Pastoral notes log (sensitive)' },
   { key: 'core_issues', label: 'Core pastoral issues (sensitive)' },
   { key: 'prayer_requests', label: 'Prayer requests (made by / for)' },
+  { key: 'documents', label: 'Documents, links, & screenshots' },
 ];
 
 export default function EulogyDraftModal({ open, onClose, person, onAccept }) {
@@ -442,6 +444,32 @@ async function assembleContext(person, enabled) {
           return `- (${l.relationship}, ${date}) ${r.request_text}`;
         });
         blocks.push('## PRAYER REQUESTS (LINKED)\n\n' + lines.join('\n'));
+      }
+    } catch {
+      /* skip */
+    }
+  }
+
+  if (enabled.has('documents')) {
+    try {
+      const docs = await listDocuments(person.id);
+      if (docs.length > 0) {
+        const lines = docs.map((d) => {
+          const head = `### ${d.title || `(${d.kind})`} — ${new Date(d.created_at).toLocaleDateString()}`;
+          // Prefer the summary; fall back to body / notes / url.
+          let body;
+          if (d.summary) body = d.summary;
+          else if (d.body)
+            body =
+              d.body.slice(0, 2000) +
+              (d.body.length > 2000 ? '\n…(truncated)' : '');
+          else if (d.notes) body = d.notes;
+          else if (d.url) body = `Link: ${d.url}`;
+          else if (d.original_filename) body = `File: ${d.original_filename}`;
+          else body = '(no content)';
+          return head + '\n' + body;
+        });
+        blocks.push('## DOCUMENTS & ARTIFACTS\n\n' + lines.join('\n\n'));
       }
     } catch {
       /* skip */
