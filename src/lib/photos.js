@@ -23,6 +23,22 @@ function makeStoragePath(ownerUserId, personId) {
   return `${ownerUserId}/${personId}/${ts}-${rand}.jpg`;
 }
 
+// Cheap count of how many photo rows a person has. Used by the
+// importer to decide whether to seed a family photo (we only seed
+// when the person has 0 photos so we don't trample anything the
+// pastor uploaded by hand).
+export async function countPhotos(personId) {
+  if (!personId) return 0;
+  const { count, error } = await withTimeout(
+    supabase
+      .from('pastoral_people_photos')
+      .select('id', { count: 'exact', head: true })
+      .eq('person_id', personId)
+  );
+  if (error) throw error;
+  return count ?? 0;
+}
+
 // List all photos for a person, oldest first within sort_order.
 export async function listPhotos(personId) {
   const { data, error } = await withTimeout(

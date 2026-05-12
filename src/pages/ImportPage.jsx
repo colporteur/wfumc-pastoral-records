@@ -4,8 +4,10 @@ import { useAuth } from '../contexts/AuthContext.jsx';
 import { upsertPersonByExternalId } from '../lib/people';
 import {
   buildImportPatches,
+  dataUrlToFile,
   summarizeExport,
 } from '../lib/icdImport';
+import { countPhotos, uploadPhoto } from '../lib/photos';
 
 // Import flow for the Instant Church Directory JSON file produced by
 // the in-browser extractor. Two phases:
@@ -29,6 +31,7 @@ export default function ImportPage() {
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [result, setResult] = useState(null);
   const [errors, setErrors] = useState([]);
+  const [uploadPhotos, setUploadPhotos] = useState(true);
 
   const summary = exportBlob ? summarizeExport(exportBlob) : null;
 
@@ -72,16 +75,25 @@ export default function ImportPage() {
     setRunning(true);
     setProgress({ done: 0, total: patches.length });
     setErrors([]);
-    const tally = { created: 0, updated: 0, failed: 0 };
+    const tally = {
+      created: 0,
+      updated: 0,
+      failed: 0,
+      photosUploaded: 0,
+      photosSkipped: 0,
+    };
     for (let i = 0; i < patches.length; i++) {
-      const { externalSource, externalId, patch, person } = patches[i];
+      const { externalSource, externalId, patch, person, familyPhoto } =
+        patches[i];
+      let createdOrUpdatedRow = null;
       try {
-        const { action } = await upsertPersonByExternalId({
+        const { action, row } = await upsertPersonByExternalId({
           ownerUserId: user.id,
           externalSource,
           externalId,
           patch,
         });
+        createdOrUpdatedRow = row;
         if (action === 'created') tally.created++;
         else tally.updated++;
       } catch (e) {
@@ -101,6 +113,55 @@ export default function ImportPage() {
             : prev
         );
       }
+
+      // Photo upload — best-effort. Only seed when the person has 0
+      // photos so we never trample anything the pastor uploaded by hand.
+      if (
+        uploadPhotos &&
+        createdOrUpdatedRow &&
+        familyPhoto?.dataUrl
+      ) {
+        try {
+          const existingCount = await countPhotos(createdOrUpdatedRow.id);
+          if (existingCount === 0) {
+            const file = dataUrlToFile(
+              familyPhoto.dataUrl,
+              `icd-${externalId}.jpg`
+            );
+            if (file) {
+              await uploadPhoto({
+                file,
+                personId: createdOrUpdatedRow.id,
+                ownerUserId: user.id,
+                caption: 'From church directory',
+              });
+              tally.photosUploaded++;
+            } else {
+              tally.photosSkipped++;
+            }
+          } else {
+            tally.photosSkipped++;
+          }
+        } catch (e) {
+          // Photo failures are non-fatal for the row itself; record but
+          // don't bump tally.failed (the person row is fine).
+          setErrors((prev) =>
+            prev.length < 25
+              ? [
+                  ...prev,
+                  {
+                    who:
+                      `${person?.firstName || ''} ${
+                        person?.familyLastName || ''
+                      }`.trim() + ' (photo)',
+                    error: e.message || String(e),
+                  },
+                ]
+              : prev
+          );
+        }
+      }
+
       setProgress({ done: i + 1, total: patches.length });
     }
     setResult(tally);
@@ -182,14 +243,32 @@ export default function ImportPage() {
               <li>
                 <strong>{summary.familyCount}</strong> families,{' '}
                 <strong>{summary.personCount}</strong> people
+                {summary.photoCount > 0 && (
+                  <>
+                    , <strong>{summary.photoCount}</strong> family photos
+                  </>
+                )}
               </li>
             </ul>
             <p className="text-xs text-gray-500">
               Each person will be upserted by their ICD personId. Re-runs
-              update rows in place — no duplicates. Pastoral fields you've
-              added (notes, faith background, eulogy notes, etc.) are
-              preserved on update.
+              update rows in place — no duplicates. Pastoral fields
+              you've added (notes, faith background, eulogy notes, etc.)
+              are preserved on update.
             </p>
+            {summary.photoCount > 0 && (
+              <label className="inline-flex items-center gap-2 text-sm cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={uploadPhotos}
+                  onChange={(e) => setUploadPhotos(e.target.checked)}
+                  className="rounded border-gray-300"
+                />
+                Upload {summary.photoCount} family photo
+                {summary.photoCount === 1 ? '' : 's'} as the main photo for
+                each person who doesn't already have one
+              </label>
+            )}
           </div>
 
           {running ? (
@@ -241,6 +320,19 @@ export default function ImportPage() {
             <li className="text-blue-700">
               ↻ Updated: <strong>{result.updated}</strong>
             </li>
+            {(result.photosUploaded > 0 || result.photosSkipped > 0) && (
+              <li className="text-gray-700">
+                📸 Photos uploaded:{' '}
+                <strong>{result.photosUploaded}</strong>
+                {result.photosSkipped > 0 && (
+                  <>
+                    {' '}
+                    (skipped <strong>{result.photosSkipped}</strong> — person
+                    already had a photo)
+                  </>
+                )}
+              </li>
+            )}
             {result.failed > 0 && (
               <li className="text-red-700">
                 ⚠ Failed: <strong>{result.failed}</strong>

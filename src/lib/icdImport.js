@@ -134,8 +134,9 @@ function composeNotes(record, person) {
 }
 
 // Walk an ICD export blob and yield one { externalId, patch, family,
-// person } for each person. Used by the importer to drive the actual
-// upserts.
+// person, familyPhoto } for each person. familyPhoto is the same
+// dataUrl/mimeType payload pulled in by the v2 extractor; the importer
+// converts it to a File and uploads when appropriate.
 export function buildImportPatches(exportBlob) {
   if (!exportBlob || !Array.isArray(exportBlob.records)) return [];
   const out = [];
@@ -150,6 +151,7 @@ export function buildImportPatches(exportBlob) {
           patch: built.patch,
           family: record.family,
           person,
+          familyPhoto: record.familyPhoto || null,
         });
       }
     }
@@ -159,13 +161,39 @@ export function buildImportPatches(exportBlob) {
 
 export function summarizeExport(exportBlob) {
   if (!exportBlob || !Array.isArray(exportBlob.records))
-    return { familyCount: 0, personCount: 0 };
+    return { familyCount: 0, personCount: 0, photoCount: 0 };
   let personCount = 0;
-  for (const r of exportBlob.records) personCount += (r.persons || []).length;
+  let photoCount = 0;
+  for (const r of exportBlob.records) {
+    personCount += (r.persons || []).length;
+    if (r.familyPhoto?.dataUrl) photoCount++;
+  }
   return {
     familyCount: exportBlob.records.length,
     personCount,
+    photoCount,
     extractedAt: exportBlob.extractedAt,
     source: exportBlob.source,
+    schemaVersion: exportBlob.schemaVersion || 1,
   };
+}
+
+// Convert a base64 data URL like "data:image/jpeg;base64,/9j/..." into a
+// browser File object suitable for our existing uploadPhoto helper.
+// Returns null if the input isn't a recognizable data URL.
+export function dataUrlToFile(dataUrl, filename = 'icd-family-photo.jpg') {
+  if (typeof dataUrl !== 'string') return null;
+  const m = /^data:([^;]+);base64,(.*)$/.exec(dataUrl);
+  if (!m) return null;
+  const mime = m[1] || 'image/jpeg';
+  const b64 = m[2] || '';
+  try {
+    const bin = atob(b64);
+    const len = bin.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+    return new File([bytes], filename, { type: mime });
+  } catch {
+    return null;
+  }
 }
