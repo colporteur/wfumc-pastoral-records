@@ -306,6 +306,410 @@ export async function summarizeDocument({ sourceText, personName, title }) {
 // The data gathering happens client-side; this function just sends
 // the assembled context to Claude.
 
+// =====================================================================
+// Clergy Record / Obituary importer — Phase A
+// =====================================================================
+//
+// Three helpers powering the per-person "Import Clergy Record" /
+// "Import Obituary" buttons on PersonDetail:
+//
+//   extractClergyRecord({ imageBase64, mimeType })
+//     Vision call. Clergy records vary between funeral homes; the
+//     prompt describes the KIND of information to extract rather than
+//     a specific form layout. The same JSON schema as extractObituary
+//     so the review UI is one piece of code.
+//
+//   extractObituary({ url?, pastedText?, imageBase64?, mimeType? })
+//     Same schema, different prompt. URLs are pre-fetched to plain
+//     text by lib/recordImports.js via the url-fetch Edge Function;
+//     pasted text and photos are passed straight through.
+//
+//   inferRelativeToRelative({ subjectName, relativeA, relativeB })
+//     Tiny prompt: given subject, relativeA's role to subject, and
+//     relativeB's role to subject, returns relativeA's role to
+//     relativeB. Powers auto-propagation of family_links to the
+//     subject's existing directory family (Sidney's brother becomes
+//     Sidney's daughter's uncle).
+//
+// All three return JSON. Errors bubble up with readable messages.
+
+// Canonical JSON shape both extractors target. Kept here as a comment
+// so future tweaks to the prompts can reference one source of truth.
+//
+// {
+//   "subject": {
+//     "name": "Sidney Leo Lanier, Jr.",
+//     "birth_date": "1938-03-10",  // ISO if confident; null if absent
+//     "death_date": "2026-05-14",
+//     "place_of_birth": "Waycross, Georgia",
+//     "place_of_death": "Tanner-East Alabama",
+//     "marital_status": "Widowed",
+//     "church_affiliation": "First United Methodist Church",
+//     "religion": null,
+//     "address": "755 N Main Street, Wedowee, AL"
+//   },
+//   "family": [
+//     {
+//       "name": "Mary Ann Lanier",
+//       "relationship_to_subject": "daughter",
+//       "status": "living",            // "living" | "deceased"
+//       "birth_date": null,
+//       "death_date": null,
+//       "spouse_of": null,             // name of the family member this
+//                                      // person is married to (so a
+//                                      // son-in-law can be paired with
+//                                      // the daughter), if known
+//       "notes": ""
+//     },
+//     ...
+//   ],
+//   "service": {                       // funeral / interment, if present
+//     "date": "2026-05-21",
+//     "time": "11:00 AM",
+//     "location": "First United Methodist Church",
+//     "interment": "Wedowee City Cemetery",
+//     "clergy": "Rev. Todd Noren-Hentz"
+//   },
+//   "confidence_notes": "..."          // optional: anything the model is
+//                                      // uncertain about
+// }
+
+const EXTRACTION_SCHEMA_DESCRIPTION =
+  'Return JSON with this shape (omit any field you cannot determine — use null, ' +
+  'never invent data):\n' +
+  '{\n' +
+  '  "subject": {\n' +
+  '    "name": string,\n' +
+  '    "birth_date": ISO date string or null (e.g. "1938-03-10"),\n' +
+  '    "death_date": ISO date string or null,\n' +
+  '    "place_of_birth": string or null,\n' +
+  '    "place_of_death": string or null,\n' +
+  '    "marital_status": string or null (e.g. "Widowed", "Married"),\n' +
+  '    "church_affiliation": string or null,\n' +
+  '    "religion": string or null,\n' +
+  '    "address": string or null\n' +
+  '  },\n' +
+  '  "family": [\n' +
+  '    {\n' +
+  '      "name": string,\n' +
+  '      "relationship_to_subject": string (e.g. "daughter", "son", "brother",\n' +
+  '          "sister", "wife", "husband", "father", "mother", "grandchild",\n' +
+  '          "son-in-law", "daughter-in-law", "stepson", "stepdaughter"),\n' +
+  '      "status": "living" or "deceased",\n' +
+  '      "birth_date": ISO date string or null,\n' +
+  '      "death_date": ISO date string or null,\n' +
+  '      "spouse_of": string or null (the name of another family member\n' +
+  '          this person is married to, if a couple is mentioned together;\n' +
+  '          e.g. for "Lorenzo and Laura Alonso" listed as grandchildren,\n' +
+  '          one row could have spouse_of: "Laura Alonso"),\n' +
+  '      "notes": string or empty string\n' +
+  '    }\n' +
+  '  ],\n' +
+  '  "service": {\n' +
+  '    "date": ISO date or null,\n' +
+  '    "time": string or null,\n' +
+  '    "location": string or null,\n' +
+  '    "interment": string or null,\n' +
+  '    "clergy": string or null\n' +
+  '  },\n' +
+  '  "confidence_notes": string or empty string (anything you are uncertain\n' +
+  '      about — illegible names, ambiguous relationships, dates you guessed)\n' +
+  '}\n';
+
+const FAMILY_EXTRACTION_GUIDANCE =
+  'For each family member mentioned:\n' +
+  '- Use the relationship as stated relative to the subject (the deceased / ' +
+  'person the record is about), not relative to other family members.\n' +
+  '- If a couple is listed together (e.g. "Mary and John Smith, daughter and ' +
+  'son-in-law"), produce TWO rows — one per person — and use the spouse_of ' +
+  'field to link them.\n' +
+  '- For nicknames in parentheses (e.g. "Louisa Alonso (Ginger)"), use the ' +
+  'formal name in the "name" field and put the nickname in "notes".\n' +
+  '- Treat sections labelled "Preceded in Death By", "Predeceased By", or ' +
+  'similar as deceased family members.\n' +
+  '- Treat sections labelled "Survivors", "Survived By", "Survivors List", ' +
+  'or similar as living family members.\n' +
+  '- DO NOT include the subject themselves in the family list.\n' +
+  '- DO NOT invent family members. If a section is blank or partially ' +
+  'filled, only return the people whose names you can clearly read.\n';
+
+// ---------------------------------------------------------------------
+// extractClergyRecord
+// ---------------------------------------------------------------------
+//
+// `imageBase64` is the raw base-64-encoded image bytes (no data URL
+// prefix). `mimeType` should be one of image/jpeg, image/png, image/gif,
+// image/webp — whatever the photo upload helper produces.
+//
+// The prompt is deliberately format-agnostic. Funeral-home clergy
+// records vary; some are typed forms, some handwritten, some scanned,
+// some emailed as plain photos of a printed page. Claude is told what
+// kinds of fields tend to appear and is expected to map whatever it
+// sees to the canonical schema above.
+
+export async function extractClergyRecord({ imageBase64, mimeType }) {
+  if (!imageBase64) {
+    throw new Error('No image provided for clergy-record extraction.');
+  }
+  if (!mimeType) {
+    throw new Error('No mimeType provided for clergy-record extraction.');
+  }
+
+  const system =
+    'You are helping a pastor extract structured information from a ' +
+    'funeral-home Clergy Record form. These forms vary between funeral ' +
+    'homes but generally contain the deceased\'s biographical information ' +
+    '(name, dates, place of birth, place of death, address, church ' +
+    'affiliation, marital status), the funeral service details (date, ' +
+    'time, location, interment, clergy), and lists of family members — ' +
+    'usually a "Survivors" section (still living) and a "Preceded in ' +
+    'Death By" section (deceased relatives). The form may be typed, ' +
+    'printed, handwritten, or a mix. Some fields may be blank.\n\n' +
+    'Your job is to faithfully transcribe what you see into a JSON ' +
+    'object. Do not infer or invent — if a field is blank or illegible, ' +
+    'use null and note the uncertainty in confidence_notes. Output JSON ' +
+    'ONLY, no preamble, no code fences.\n\n' +
+    EXTRACTION_SCHEMA_DESCRIPTION +
+    '\n' +
+    FAMILY_EXTRACTION_GUIDANCE;
+
+  const contentBlocks = [
+    {
+      type: 'text',
+      text:
+        'Here is a photo of a Clergy Record from a funeral home. Extract ' +
+        'the structured information as described and return JSON only.',
+    },
+    {
+      type: 'image',
+      source: {
+        type: 'base64',
+        media_type: mimeType,
+        data: imageBase64,
+      },
+    },
+  ];
+
+  const result = await callClaude(
+    {
+      system,
+      messages: [{ role: 'user', content: contentBlocks }],
+      max_tokens: 4000,
+    },
+    { timeoutMs: 120000 }
+  );
+  return parseClaudeJson(firstText(result));
+}
+
+// ---------------------------------------------------------------------
+// extractObituary
+// ---------------------------------------------------------------------
+//
+// Three input modes (pass exactly one; the others may be omitted):
+//   - url + pastedText: pre-fetched HTML body text (caller handles
+//     url-fetch Edge Function call and passes the resulting `text`)
+//   - pastedText alone: plain-text obit the pastor copy/pasted
+//   - imageBase64 + mimeType: photo of a printed obit
+//
+// If `url` is provided alongside pastedText, it's just stamped into the
+// prompt as context ("this came from {url}") — fetching is the caller's
+// responsibility.
+
+export async function extractObituary({
+  url,
+  pastedText,
+  imageBase64,
+  mimeType,
+}) {
+  const hasText = typeof pastedText === 'string' && pastedText.trim().length > 0;
+  const hasImage = Boolean(imageBase64 && mimeType);
+  if (!hasText && !hasImage) {
+    throw new Error(
+      'Provide either pastedText (with or without a source URL) or an image.'
+    );
+  }
+
+  const system =
+    'You are helping a pastor extract structured information from an ' +
+    'obituary. Obituaries vary in style — funeral-home tribute pages, ' +
+    'newspaper notices, family-written remembrances — but they generally ' +
+    'contain the deceased\'s biographical details, a narrative of their ' +
+    'life, family relationships (parents, spouse, children, ' +
+    'grandchildren, siblings, sometimes great-grandchildren), and the ' +
+    'service / interment information.\n\n' +
+    'Your job is to faithfully extract what is stated, into a JSON object. ' +
+    'Do not infer or invent. If the obituary mentions someone\'s death ' +
+    'within the narrative ("preceded in death by his wife Willie in ' +
+    '2008"), include that person as a deceased family member with a ' +
+    'death date if given. Output JSON ONLY, no preamble, no code fences.\n\n' +
+    EXTRACTION_SCHEMA_DESCRIPTION +
+    '\n' +
+    FAMILY_EXTRACTION_GUIDANCE;
+
+  let contentBlocks;
+  if (hasImage) {
+    contentBlocks = [
+      {
+        type: 'text',
+        text:
+          'Here is a photo of an obituary. Extract the structured ' +
+          'information as described and return JSON only.',
+      },
+      {
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: mimeType,
+          data: imageBase64,
+        },
+      },
+    ];
+    // If the photo came with a known URL, mention it as context.
+    if (url) {
+      contentBlocks.push({
+        type: 'text',
+        text: `Source URL (for context only): ${url}`,
+      });
+    }
+  } else {
+    // Text-only path. URL is helpful context for Claude (sometimes the
+    // funeral-home page has the deceased's name in the URL slug).
+    const head = url ? `Source URL: ${url}\n\n` : '';
+    contentBlocks = [
+      {
+        type: 'text',
+        text:
+          head +
+          'Obituary text:\n\n' +
+          pastedText.trim() +
+          '\n\nExtract the structured information as described and ' +
+          'return JSON only.',
+      },
+    ];
+  }
+
+  const result = await callClaude(
+    {
+      system,
+      messages: [{ role: 'user', content: contentBlocks }],
+      max_tokens: 4000,
+    },
+    { timeoutMs: 120000 }
+  );
+  return parseClaudeJson(firstText(result));
+}
+
+// ---------------------------------------------------------------------
+// inferRelativeToRelative
+// ---------------------------------------------------------------------
+//
+// Given the subject and two relatives' relationships TO the subject,
+// returns the implied relationship between the two relatives, as one
+// of the strings the pastoral_family_links.relationship_a_to_b enum
+// accepts. Example: subject's brother (relativeA) and subject's
+// daughter (relativeB) → relativeA is relativeB's "aunt_uncle".
+//
+// We give Claude the enum + symmetry notes so it never invents a new
+// label. If Claude returns something off-enum or genuinely can't
+// determine the relationship, we return null and the caller leaves the
+// link unproposed (pastor can add it manually).
+//
+// Cheap call — single short prompt, low max_tokens. Caller batches
+// these as part of the commit step.
+
+const FAMILY_LINK_ENUM = [
+  'spouse',
+  'sibling',
+  'parent',
+  'child',
+  'grandparent',
+  'grandchild',
+  'aunt_uncle',
+  'niece_nephew',
+  'cousin',
+  'in_law',
+  'other',
+];
+
+export async function inferRelativeToRelative({
+  subjectName,
+  relativeAName,
+  relativeARelToSubject,
+  relativeBName,
+  relativeBRelToSubject,
+}) {
+  if (!subjectName || !relativeAName || !relativeBName) {
+    throw new Error(
+      'inferRelativeToRelative requires subjectName, relativeAName, relativeBName.'
+    );
+  }
+  if (!relativeARelToSubject || !relativeBRelToSubject) {
+    throw new Error(
+      'inferRelativeToRelative requires both relatives\' relationship to the subject.'
+    );
+  }
+
+  const system =
+    'You are helping a pastor determine the implied family relationship ' +
+    'between two people, given how each relates to a common third person ' +
+    '(the "subject"). Return JSON in this exact shape:\n' +
+    '  { "relationship_a_to_b": <one of the allowed values>, "confidence": "high" | "medium" | "low", "rationale": "one short sentence" }\n\n' +
+    'Allowed values for relationship_a_to_b (Person A\'s relationship TO Person B):\n' +
+    '  - spouse       — A is B\'s spouse (symmetric)\n' +
+    '  - sibling      — A is B\'s sibling (symmetric)\n' +
+    '  - parent       — A is B\'s parent\n' +
+    '  - child        — A is B\'s child\n' +
+    '  - grandparent  — A is B\'s grandparent\n' +
+    '  - grandchild   — A is B\'s grandchild\n' +
+    '  - aunt_uncle   — A is B\'s aunt or uncle\n' +
+    '  - niece_nephew — A is B\'s niece or nephew\n' +
+    '  - cousin       — A is B\'s cousin (symmetric)\n' +
+    '  - in_law       — A is B\'s in-law (use when no closer-blood label fits)\n' +
+    '  - other        — none of the above\n\n' +
+    'If the relationship is unclear, ambiguous, or weakly inferred (e.g. ' +
+    'two grandchildren of the subject might be siblings OR cousins ' +
+    'depending on which child of the subject is their parent), return ' +
+    'confidence: "low" and choose the safest label, or use "other" with ' +
+    'a rationale. Output JSON only — no preamble, no code fences.';
+
+  const userMsg =
+    `Subject (common third person): ${subjectName}\n` +
+    `Person A: ${relativeAName} — is the subject's ${relativeARelToSubject}\n` +
+    `Person B: ${relativeBName} — is the subject's ${relativeBRelToSubject}\n\n` +
+    'What is Person A\'s relationship TO Person B?';
+
+  const result = await callClaude(
+    {
+      system,
+      messages: [{ role: 'user', content: userMsg }],
+      max_tokens: 300,
+    },
+    { timeoutMs: 30000 }
+  );
+  const parsed = parseClaudeJson(firstText(result));
+  const rel = typeof parsed?.relationship_a_to_b === 'string'
+    ? parsed.relationship_a_to_b.trim().toLowerCase()
+    : '';
+  if (!FAMILY_LINK_ENUM.includes(rel)) {
+    return {
+      relationship_a_to_b: null,
+      confidence: 'low',
+      rationale:
+        'Claude returned a relationship value not in the allowed enum (' +
+        (rel || '(empty)') +
+        ').',
+    };
+  }
+  return {
+    relationship_a_to_b: rel,
+    confidence:
+      ['high', 'medium', 'low'].includes(String(parsed.confidence).toLowerCase())
+        ? String(parsed.confidence).toLowerCase()
+        : 'medium',
+    rationale: typeof parsed.rationale === 'string' ? parsed.rationale.trim() : '',
+  };
+}
+
 export async function draftEulogyOutline({ personLabel, sectionsContext }) {
   const text = (sectionsContext || '').trim();
   if (!text) {
