@@ -13,6 +13,7 @@ import PersonPrayerRequests from '../components/PersonPrayerRequests.jsx';
 import PersonPets from '../components/PersonPets.jsx';
 import PersonSignificantDeaths from '../components/PersonSignificantDeaths.jsx';
 import PersonRecordImports from '../components/PersonRecordImports.jsx';
+import PersonalDatesExtras from '../components/PersonalDatesExtras.jsx';
 import ObituaryUpload from '../components/ObituaryUpload.jsx';
 import EulogyDraftModal from '../components/EulogyDraftModal.jsx';
 import PersonDocuments from '../components/PersonDocuments.jsx';
@@ -43,6 +44,12 @@ export default function PersonDetail() {
   // components can ask it to refresh after promoting a new issue.
   const coreIssuesRef = useRef(null);
   const refreshCoreIssues = () => coreIssuesRef.current?.refresh();
+
+  // Bumped after any operation that might change the subject's
+  // anniversary-relevant data — currently fired by the record-imports
+  // commit. Drives PersonalDatesExtras' useEffect to re-query.
+  const [datesRefreshKey, setDatesRefreshKey] = useState(0);
+  const bumpDatesRefresh = () => setDatesRefreshKey((k) => k + 1);
 
   // Eulogy-draft modal open state — pulled into the page so the modal
   // can live at the page root rather than inside the (collapsible)
@@ -485,6 +492,10 @@ export default function PersonDetail() {
             />
           </Field>
         </Grid>
+        <PersonalDatesExtras
+          personId={id}
+          refreshKey={datesRefreshKey}
+        />
       </Section>
 
       <Section title="Church roles">
@@ -556,8 +567,12 @@ export default function PersonDetail() {
           onChanged={() => {
             // The importer can backfill subject fields (birthdate /
             // death_date), so re-load the person row so the editor
-            // above reflects the freshly-committed data.
+            // above reflects the freshly-committed data. We also bump
+            // the anniversaries refresh key so PersonalDatesExtras
+            // picks up newly-committed significant_deaths and family
+            // links without a page reload.
             refreshSavedPerson();
+            bumpDatesRefresh();
           }}
         />
       </Section>
