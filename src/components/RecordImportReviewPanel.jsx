@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useAuth } from '../contexts/AuthContext.jsx';
 import PersonPicker from './PersonPicker.jsx';
-import { commitImport, updateImport } from '../lib/recordImports';
+import {
+  commitImport,
+  countImportArtifacts,
+  updateImport,
+} from '../lib/recordImports';
 import { inferRelativeToRelative } from '../lib/claude';
 import { listLinksFor, relationshipLabel } from '../lib/familyLinks';
 import { getPerson, fullName } from '../lib/people';
@@ -122,25 +126,50 @@ function blankFamilyDecision() {
   };
 }
 
-// Hydrate the Phase A raw_extraction.family[] array into the
-// decision shape the panel renders + commitImport expects.
+// Hydrate the Phase A raw_extraction.family[] array into the decision
+// shape the panel renders + commitImport expects.
+//
+// Phase E: When the import has been saved previously, the family rows
+// carry editor-only fields prefixed with `_` (e.g. _target,
+// _directory_person_id) that record the pastor's per-row decisions.
+// Prefer those over the defaults so re-opening a saved import shows
+// exactly what the pastor left it as — not a freshly-defaulted view.
 function decisionsFromExtraction(extraction) {
   const fam = Array.isArray(extraction?.family) ? extraction.family : [];
-  return fam.map((m) => ({
-    skip: false,
-    name: (m.name || '').trim(),
-    status: (m.status || '').toLowerCase() === 'deceased' ? 'deceased' : 'living',
-    relationship_to_subject: (m.relationship_to_subject || '').trim(),
-    birth_date: (m.birth_date || '').trim(),
-    death_date: (m.death_date || '').trim(),
-    notes: [m.notes, m.spouse_of ? `spouse of ${m.spouse_of}` : '']
-      .filter(Boolean)
-      .join(' · '),
-    target: defaultTarget(m),
-    directory_person_id: null,
-    directory_person_label: '',
-    family_link_relationship: guessFamilyLinkEnum(m.relationship_to_subject),
-  }));
+  return fam.map((m) => {
+    const hasEditorState =
+      m._target !== undefined ||
+      m._directory_person_id !== undefined ||
+      m._skip !== undefined;
+    return {
+      skip: hasEditorState ? Boolean(m._skip) : false,
+      name: (m.name || '').trim(),
+      status:
+        (m.status || '').toLowerCase() === 'deceased' ? 'deceased' : 'living',
+      relationship_to_subject: (m.relationship_to_subject || '').trim(),
+      birth_date: (m.birth_date || '').trim(),
+      death_date: (m.death_date || '').trim(),
+      notes: hasEditorState
+        ? // On rehydrate the saved notes already include whatever the
+          // pastor typed (which subsumed the spouse_of bridge text on
+          // first decoration), so don't re-decorate.
+          (m.notes || '').trim()
+        : [m.notes, m.spouse_of ? `spouse of ${m.spouse_of}` : '']
+            .filter(Boolean)
+            .join(' · '),
+      target: hasEditorState && m._target ? m._target : defaultTarget(m),
+      directory_person_id: hasEditorState
+        ? m._directory_person_id || null
+        : null,
+      directory_person_label: hasEditorState
+        ? m._directory_person_label || ''
+        : '',
+      family_link_relationship:
+        hasEditorState && m._family_link_relationship
+          ? m._family_link_relationship
+          : guessFamilyLinkEnum(m.relationship_to_subject),
+    };
+  });
 }
 
 // Per-field guard: only show the "Apply to directory person" checkbox
@@ -182,6 +211,38 @@ export default function RecordImportReviewPanel({
   const [error, setError] = useState(null);
   const [savedAt, setSavedAt] = useState(null);
 
+  // ---- Phase E: last-commit summary ----
+  //
+  // When the import has been committed before, count the child rows
+  // currently stamped with this import's id so the pastor sees what
+  // would be wiped on re-commit. Fast — uses HEAD counts on indexed
+  // columns. Re-fetched whenever the importRow id changes or a commit
+  // completes.
+  const [lastCommitCounts, setLastCommitCounts] = useState(null);
+  const [lastCommitLoading, setLastCommitLoading] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!importRow?.id || !importRow.committed_at) {
+      setLastCommitCounts(null);
+      return undefined;
+    }
+    setLastCommitLoading(true);
+    (async () => {
+      try {
+        const c = await countImportArtifacts(importRow.id);
+        if (!cancelled) setLastCommitCounts(c);
+      } catch {
+        if (!cancelled) setLastCommitCounts(null);
+      } finally {
+        if (!cancelled) setLastCommitLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [importRow?.id, importRow?.committed_at]);
+
   // ---- Phase C: subject's existing directory family + inferred links ----
   //
   // existingFamily: array of { other_person_id, displayed_relationship,
@@ -198,8 +259,14 @@ export default function RecordImportReviewPanel({
   const [inferError, setInferError] = useState(null);
   // documentShareTargetIds: pastoral_people.id list to receive a share
   // of the import's source_document_id on commit. Defaults to every
-  // directory_link target currently in `decisions`.
+  // directory_link target currently in `decisions`, unless the pastor
+  // has explicitly customised the set (tracked by shareTargetsDirty).
   const [shareTargetIds, setShareTargetIds] = useState(() => new Set());
+  // Set to true once the pastor manually ticks/unticks a share target;
+  // suppresses the auto-default effect from then on so their explicit
+  // choices stick across keystrokes. Also rehydrated from a saved
+  // import's raw_extraction (`_share_targets_dirty`).
+  const [shareTargetsDirty, setShareTargetsDirty] = useState(false);
 
   // Load subject's existing directory family once per subject. The
   // resolver in lib/familyLinks.js already normalizes the rows to
@@ -249,8 +316,12 @@ export default function RecordImportReviewPanel({
 
   // Default share-targets to the directory_link picks the pastor has
   // currently accepted. Recomputed whenever the decision set or its
-  // directory_person_ids change.
+  // directory_person_ids change — UNLESS the pastor has manually
+  // customised the set (shareTargetsDirty), in which case we preserve
+  // their explicit choices. Their customisation is also persisted into
+  // the raw_extraction so it survives close+reopen.
   useEffect(() => {
+    if (shareTargetsDirty) return;
     const defaults = new Set();
     for (const d of decisions) {
       if (
@@ -266,6 +337,7 @@ export default function RecordImportReviewPanel({
     // changes every keystroke); the stringified ids list is what matters.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
+    shareTargetsDirty,
     decisions
       .filter((d) => !d.skip && d.target === 'directory_link')
       .map((d) => d.directory_person_id)
@@ -276,26 +348,57 @@ export default function RecordImportReviewPanel({
 
   // Re-seed when the underlying import switches (e.g. user opened the
   // "Edit import" flow and we passed a different importRow in).
+  //
+  // Phase E: also rehydrate the editor-only cross-row state from the
+  // saved raw_extraction so the pastor sees their prior auto-link
+  // approvals and share-target toggles, not freshly-defaulted state.
   useEffect(() => {
+    const ex = importRow?.raw_extraction || {};
     setSubjectDraft({
-      name: importRow?.raw_extraction?.subject?.name || '',
-      birth_date: importRow?.raw_extraction?.subject?.birth_date || '',
-      death_date: importRow?.raw_extraction?.subject?.death_date || '',
-      place_of_birth:
-        importRow?.raw_extraction?.subject?.place_of_birth || '',
-      place_of_death:
-        importRow?.raw_extraction?.subject?.place_of_death || '',
-      marital_status:
-        importRow?.raw_extraction?.subject?.marital_status || '',
-      church_affiliation:
-        importRow?.raw_extraction?.subject?.church_affiliation || '',
-      religion: importRow?.raw_extraction?.subject?.religion || '',
-      address: importRow?.raw_extraction?.subject?.address || '',
+      name: ex?.subject?.name || '',
+      birth_date: ex?.subject?.birth_date || '',
+      death_date: ex?.subject?.death_date || '',
+      place_of_birth: ex?.subject?.place_of_birth || '',
+      place_of_death: ex?.subject?.place_of_death || '',
+      marital_status: ex?.subject?.marital_status || '',
+      church_affiliation: ex?.subject?.church_affiliation || '',
+      religion: ex?.subject?.religion || '',
+      address: ex?.subject?.address || '',
     });
-    setSubjectApplyFlags({});
-    setDecisions(decisionsFromExtraction(importRow?.raw_extraction || {}));
+    setSubjectApplyFlags(
+      ex?._subject_apply_flags && typeof ex._subject_apply_flags === 'object'
+        ? { ...ex._subject_apply_flags }
+        : {}
+    );
+    setDecisions(decisionsFromExtraction(ex));
     setNotes(importRow?.notes || '');
     setSavedAt(null);
+    // Inferred-link proposals: restore each one exactly, preserving
+    // the pastor's per-row approval flags.
+    setInferredProposals(
+      Array.isArray(ex?._inferred_proposals)
+        ? ex._inferred_proposals.map((p) => ({
+            person_a_id: p.person_a_id,
+            person_b_id: p.person_b_id,
+            relationship_a_to_b: p.relationship_a_to_b,
+            _label: p._label || '',
+            _rationale: p._rationale || '',
+            _confidence: p._confidence || 'medium',
+            _approved: !!p._approved,
+          }))
+        : []
+    );
+    // Share-target overrides: if the pastor never customised them, let
+    // the default-effect repopulate from decisions. If they did, restore
+    // exactly what was saved.
+    if (ex?._share_targets_dirty) {
+      setShareTargetIds(new Set(ex._share_target_ids || []));
+      setShareTargetsDirty(true);
+    } else {
+      setShareTargetIds(new Set());
+      setShareTargetsDirty(false);
+    }
+    setInferError(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [importRow?.id]);
 
@@ -336,6 +439,11 @@ export default function RecordImportReviewPanel({
 
   // Assemble the raw_extraction shape from the edited state, mirroring
   // what Claude originally returned (so re-extract → re-edit is symmetric).
+  //
+  // Editor-only fields are persisted alongside Claude's original output
+  // (prefixed `_` on family rows; top-level keys for cross-row state)
+  // so re-open shows exactly what the pastor left it as without making
+  // them re-run Claude or re-tick share targets.
   const buildRawExtractionForSave = () => {
     const family = decisions.map((d) => ({
       name: d.name,
@@ -344,8 +452,7 @@ export default function RecordImportReviewPanel({
       birth_date: d.birth_date || null,
       death_date: d.death_date || null,
       notes: d.notes,
-      // Editor-only fields persisted into the extraction so re-open
-      // remembers the pastor's per-row decisions:
+      // Editor-only — see decisionsFromExtraction for the rehydration.
       _target: d.target,
       _directory_person_id: d.directory_person_id || null,
       _directory_person_label: d.directory_person_label || '',
@@ -367,6 +474,19 @@ export default function RecordImportReviewPanel({
         address: subjectDraft.address || null,
       },
       family,
+      // Phase E: cross-row editor state.
+      _inferred_proposals: inferredProposals.map((p) => ({
+        person_a_id: p.person_a_id,
+        person_b_id: p.person_b_id,
+        relationship_a_to_b: p.relationship_a_to_b,
+        _label: p._label || '',
+        _rationale: p._rationale || '',
+        _confidence: p._confidence || 'medium',
+        _approved: !!p._approved,
+      })),
+      _share_target_ids: Array.from(shareTargetIds),
+      _share_targets_dirty: shareTargetsDirty,
+      _subject_apply_flags: { ...subjectApplyFlags },
     };
   };
 
@@ -496,6 +616,10 @@ export default function RecordImportReviewPanel({
   };
 
   const toggleShareTarget = (personId) => {
+    // Once the pastor manually touches the share-target set, their
+    // selection should stick — even if they later add/remove
+    // directory_link decisions that would otherwise re-default it.
+    setShareTargetsDirty(true);
     setShareTargetIds((prev) => {
       const next = new Set(prev);
       if (next.has(personId)) next.delete(personId);
@@ -542,6 +666,14 @@ export default function RecordImportReviewPanel({
         inferredLinks: approvedInferred,
         documentShareTargetIds: Array.from(shareTargetIds),
       });
+      // Refresh the last-commit count so the banner reflects what just
+      // landed (the previous count was the PRE-recommit state).
+      try {
+        const fresh = await countImportArtifacts(importRow.id);
+        setLastCommitCounts(fresh);
+      } catch {
+        /* non-fatal — banner just stays stale until next re-open */
+      }
       onCommitted?.(result);
     } catch (e) {
       // commitImport's "partial" errors come back with .counts; in that
@@ -561,6 +693,43 @@ export default function RecordImportReviewPanel({
 
   return (
     <div className="space-y-4">
+      {/* Phase E — previously-committed banner */}
+      {importRow.committed_at && (
+        <div className="rounded border border-umc-200 bg-umc-50/60 px-3 py-2 text-xs space-y-1">
+          <div className="flex items-baseline gap-2 flex-wrap">
+            <span className="text-umc-800 font-medium">
+              ⟳ Editing an already-committed import
+            </span>
+            <span className="text-gray-500">
+              committed{' '}
+              {new Date(importRow.committed_at).toLocaleString(undefined, {
+                dateStyle: 'medium',
+                timeStyle: 'short',
+              })}
+            </span>
+          </div>
+          {lastCommitLoading && (
+            <p className="text-gray-500 italic">Counting prior rows…</p>
+          )}
+          {lastCommitCounts && (
+            <p className="text-gray-700">
+              Currently in the directory from this import:{' '}
+              {lastCommitCounts.family_links} family-link
+              {lastCommitCounts.family_links === 1 ? '' : 's'},{' '}
+              {lastCommitCounts.extended_family} extended-family,{' '}
+              {lastCommitCounts.significant_deaths} significant-death,{' '}
+              {lastCommitCounts.document_shares} doc share
+              {lastCommitCounts.document_shares === 1 ? '' : 's'}.
+            </p>
+          )}
+          <p className="text-[11px] text-gray-600 italic">
+            Re-committing wipes those rows and creates fresh ones from
+            the decisions below. Rows you added manually (without this
+            importer) are NOT touched.
+          </p>
+        </div>
+      )}
+
       {/* Subject fields */}
       <fieldset className="border border-gray-200 rounded p-3 space-y-2">
         <legend className="px-1 text-xs uppercase tracking-wide text-gray-500">

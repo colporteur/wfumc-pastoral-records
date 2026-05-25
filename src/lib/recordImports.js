@@ -184,6 +184,51 @@ export async function deleteImport(importId) {
 }
 
 /**
+ * Count the rows currently stamped with this import's id across the
+ * four target tables. Used by the review panel to render a "this
+ * import previously committed N family-links, M extended-family
+ * entries…" summary so the pastor knows what re-committing will wipe
+ * and re-create.
+ *
+ * Each row count is a separate HEAD-style query; supabase-js with
+ * { count: 'exact', head: true } returns just the count without the
+ * rows, which is what we want here.
+ */
+export async function countImportArtifacts(importId) {
+  if (!importId) {
+    return {
+      family_links: 0,
+      extended_family: 0,
+      significant_deaths: 0,
+      document_shares: 0,
+    };
+  }
+  const counts = {
+    family_links: 0,
+    extended_family: 0,
+    significant_deaths: 0,
+    document_shares: 0,
+  };
+  const tables = [
+    ['pastoral_family_links', 'family_links', 'import_source_id'],
+    ['pastoral_extended_family', 'extended_family', 'import_source_id'],
+    ['pastoral_significant_deaths', 'significant_deaths', 'import_source_id'],
+    ['pastoral_document_shares', 'document_shares', 'shared_by_import_id'],
+  ];
+  for (const [table, key, col] of tables) {
+    const { count, error } = await withTimeout(
+      supabase
+        .from(table)
+        .select('id', { count: 'exact', head: true })
+        .eq(col, importId)
+    );
+    if (error) throw error;
+    counts[key] = count || 0;
+  }
+  return counts;
+}
+
+/**
  * Wipe every row stamped with this import's id from the three target
  * tables (family_links, extended_family, significant_deaths) and also
  * any document_shares created by it. Used by the re-commit logic in
