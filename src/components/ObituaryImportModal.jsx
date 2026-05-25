@@ -323,7 +323,7 @@ export default function ObituaryImportModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/50 flex items-start sm:items-center justify-center p-3 overflow-y-auto">
+    <div className="fixed inset-0 z-50 bg-black/50 flex items-start justify-center p-3 overflow-y-auto">
       <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full my-4 p-5 space-y-3">
         <div className="flex items-start justify-between gap-3">
           <div>
