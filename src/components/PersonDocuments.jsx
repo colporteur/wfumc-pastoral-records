@@ -12,7 +12,15 @@ import {
 } from '../lib/documents';
 import { summarizeDocument } from '../lib/claude';
 import { fullName } from '../lib/people';
+import {
+  bulkCreateShares,
+  deleteShare,
+  listSharedDocsForPerson,
+  listSharesForDocument,
+} from '../lib/documentShares';
 import CoreIssueSuggesterButton from './CoreIssueSuggesterButton.jsx';
+import PersonPicker from './PersonPicker.jsx';
+import { Link } from 'react-router-dom';
 
 // Per-person documents archive: files, links, inline notes.
 //
@@ -44,22 +52,132 @@ export default function PersonDocuments({ person, onChanged }) {
   const [busy, setBusy] = useState(false);
   const [summarizingId, setSummarizingId] = useState(null);
 
+  // Phase C — docs SHARED to this person (from someone else's record).
+  // Stored separately from `items` (which is owned docs) so the share
+  // badges + read-only treatment are easy to differentiate.
+  const [sharedItems, setSharedItems] = useState([]);
+  // For the "↗ Share" affordance: which owned doc has its share popover
+  // open, plus the currently-loaded shares + a temp picked-person state.
+  const [sharePopoverFor, setSharePopoverFor] = useState(null); // doc.id
+  const [shareList, setShareList] = useState([]); // shares for the open popover
+  const [sharePickPerson, setSharePickPerson] = useState(null);
+  const [shareBusy, setShareBusy] = useState(false);
+
   const refresh = async () => {
     if (!personId) return;
     setLoading(true);
     setError(null);
     try {
-      const rows = await listDocuments(personId);
+      // Owned docs + shared-in docs in parallel.
+      const [rows, shared] = await Promise.all([
+        listDocuments(personId),
+        listSharedDocsForPerson(personId),
+      ]);
       setItems(rows);
-      const paths = rows
-        .map((r) => r.storage_path)
-        .filter(Boolean);
-      const urlMap = paths.length > 0 ? await fetchSignedUrls(paths) : new Map();
+      setSharedItems(shared);
+      // Mint signed URLs for both lists' file rows so thumbnails render
+      // identically across owned + shared docs.
+      const allPaths = [
+        ...rows.map((r) => r.storage_path).filter(Boolean),
+        ...shared
+          .map((s) => s.document?.storage_path)
+          .filter(Boolean),
+      ];
+      const urlMap =
+        allPaths.length > 0 ? await fetchSignedUrls(allPaths) : new Map();
       setUrls(urlMap);
     } catch (e) {
       setError(e.message || String(e));
     } finally {
       setLoading(false);
+    }
+  };
+
+  // ---- Phase C: share management --------------------------------
+  //
+  // openSharePopover loads the current share list for a given owned doc;
+  // closing the popover wipes the picked-person state.
+  const openSharePopover = async (doc) => {
+    setSharePopoverFor(doc.id);
+    setSharePickPerson(null);
+    try {
+      const rows = await listSharesForDocument(doc.id);
+      setShareList(rows);
+    } catch (e) {
+      setError(e.message || String(e));
+      setShareList([]);
+    }
+  };
+  const closeSharePopover = () => {
+    setSharePopoverFor(null);
+    setSharePickPerson(null);
+    setShareList([]);
+  };
+
+  const handleAddShare = async (doc) => {
+    if (!sharePickPerson?.id) return;
+    setShareBusy(true);
+    setError(null);
+    try {
+      await bulkCreateShares({
+        documentId: doc.id,
+        personIds: [sharePickPerson.id],
+        ownerUserId: user.id,
+      });
+      const rows = await listSharesForDocument(doc.id);
+      setShareList(rows);
+      setSharePickPerson(null);
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      setShareBusy(false);
+    }
+  };
+
+  const handleRemoveShare = async (shareId, docId) => {
+    if (
+      !window.confirm(
+        'Remove this share? The document stays on the original owner\'s record — just the share to this linked person goes away.'
+      )
+    ) {
+      return;
+    }
+    setShareBusy(true);
+    setError(null);
+    try {
+      await deleteShare(shareId);
+      const rows = await listSharesForDocument(docId);
+      setShareList(rows);
+      // If the same share showed up under sharedItems on the OWNER side,
+      // a parent refresh will catch it on next render — but we don't
+      // need to refresh here.
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      setShareBusy(false);
+    }
+  };
+
+  // Called from the shared-doc list (this person is the share TARGET):
+  // removes the share so the doc disappears from their PersonDocuments.
+  // The owner's copy is untouched.
+  const handleUnshareFromMe = async (share) => {
+    if (
+      !window.confirm(
+        'Remove this shared document from this person\'s page? The original on the owner\'s record stays put.'
+      )
+    ) {
+      return;
+    }
+    setShareBusy(true);
+    setError(null);
+    try {
+      await deleteShare(share.id);
+      await refresh();
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      setShareBusy(false);
     }
   };
 
@@ -417,7 +535,7 @@ export default function PersonDocuments({ person, onChanged }) {
 
       {loading ? (
         <p className="text-xs text-gray-500 italic">Loading documents…</p>
-      ) : items.length === 0 ? (
+      ) : items.length === 0 && sharedItems.length === 0 ? (
         <p className="text-xs text-gray-500 italic">
           No documents yet. Use the buttons above to upload a file, paste
           a link, or capture an inline note.
@@ -550,6 +668,18 @@ export default function PersonDocuments({ person, onChanged }) {
                         />
                         <button
                           type="button"
+                          onClick={() =>
+                            sharePopoverFor === doc.id
+                              ? closeSharePopover()
+                              : openSharePopover(doc)
+                          }
+                          className="text-gray-600 hover:text-gray-900 underline"
+                          title="Share this document with another person in the directory (it'll appear on their PersonDocuments with a 'shared from' badge)."
+                        >
+                          {sharePopoverFor === doc.id ? '↗ Hide shares' : '↗ Share'}
+                        </button>
+                        <button
+                          type="button"
                           onClick={() => startEdit(doc)}
                           className="text-gray-600 hover:text-gray-900 underline"
                         >
@@ -564,6 +694,67 @@ export default function PersonDocuments({ person, onChanged }) {
                         </button>
                       </div>
                     </div>
+
+                    {/* Share-with popover */}
+                    {sharePopoverFor === doc.id && (
+                      <div className="mt-2 rounded border border-gray-200 bg-gray-50 p-2 space-y-2">
+                        <p className="text-[10px] uppercase tracking-wide text-gray-500">
+                          Shared with
+                        </p>
+                        {shareList.length === 0 ? (
+                          <p className="text-[11px] italic text-gray-500">
+                            Not shared with anyone yet.
+                          </p>
+                        ) : (
+                          <ul className="text-xs space-y-1">
+                            {shareList.map((s) => (
+                              <li
+                                key={s.id}
+                                className="flex items-center gap-2"
+                              >
+                                <span className="flex-1">
+                                  {s.person
+                                    ? fullName(s.person)
+                                    : '(unknown)'}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleRemoveShare(s.id, doc.id)
+                                  }
+                                  disabled={shareBusy}
+                                  className="text-[11px] text-red-600 hover:text-red-800 underline disabled:opacity-40"
+                                >
+                                  Remove
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                        <div className="flex items-center gap-2">
+                          <div className="flex-1">
+                            <PersonPicker
+                              value={sharePickPerson}
+                              onChange={(p) => setSharePickPerson(p)}
+                              excludeIds={[
+                                personId,
+                                ...shareList.map((s) => s.person_id),
+                              ]}
+                              placeholder="Pick person to share with…"
+                              disabled={shareBusy}
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleAddShare(doc)}
+                            disabled={!sharePickPerson?.id || shareBusy}
+                            className="btn-secondary text-xs disabled:opacity-50"
+                          >
+                            Share
+                          </button>
+                        </div>
+                      </div>
+                    )}
 
                     {/* File rendering */}
                     {doc.kind === 'file' && signedUrl && (
@@ -633,6 +824,124 @@ export default function PersonDocuments({ person, onChanged }) {
             );
           })}
         </ul>
+      )}
+
+      {/* Phase C — Shared-in documents (this person is on the receiving
+          end of a pastoral_document_shares row). Read-only here; the
+          source person owns the doc and any edits/deletes happen there. */}
+      {!loading && sharedItems.length > 0 && (
+        <div className="mt-4 pt-3 border-t border-gray-200">
+          <p className="text-[10px] uppercase tracking-wide text-gray-500 mb-2">
+            Shared with this person ({sharedItems.length})
+          </p>
+          <ul className="divide-y divide-gray-100">
+            {sharedItems.map((s) => {
+              const doc = s.document;
+              if (!doc) return null;
+              const signedUrl = doc.storage_path && urls.get(doc.storage_path);
+              const isImage = isImageDocument(doc);
+              const ownerLabel = s.owner_person
+                ? fullName(s.owner_person)
+                : '(unknown)';
+              return (
+                <li key={s.share.id} className="py-2.5">
+                  <div className="flex items-baseline justify-between gap-2 flex-wrap">
+                    <div className="min-w-0">
+                      <span className="text-[10px] uppercase tracking-wide text-gray-500 mr-1">
+                        {doc.kind}
+                      </span>
+                      <span className="text-sm font-medium text-gray-900">
+                        {doc.title || '(untitled)'}
+                      </span>
+                      <span className="ml-2 text-[10px] text-gray-400">
+                        {new Date(doc.created_at).toLocaleDateString()}
+                      </span>
+                      <span className="ml-2 text-[10px] bg-umc-50 text-umc-800 border border-umc-200 rounded px-1.5 py-0.5">
+                        shared from{' '}
+                        {s.owner_person ? (
+                          <Link
+                            to={`/people/${s.owner_person.id}`}
+                            className="underline hover:text-umc-900"
+                          >
+                            {ownerLabel}
+                          </Link>
+                        ) : (
+                          ownerLabel
+                        )}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleUnshareFromMe(s.share)}
+                      disabled={shareBusy}
+                      className="text-xs text-red-600 hover:text-red-800 underline disabled:opacity-40"
+                      title="Remove this share from this person's page (the doc stays on the owner's record)."
+                    >
+                      Remove share
+                    </button>
+                  </div>
+
+                  {/* Same rendering as owned docs, minus edit/delete. */}
+                  {doc.kind === 'file' && signedUrl && (
+                    <div className="mt-2">
+                      {isImage ? (
+                        <a
+                          href={signedUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-block"
+                        >
+                          <img
+                            src={signedUrl}
+                            alt={doc.title || doc.original_filename || 'document'}
+                            className="max-h-48 rounded border border-gray-200"
+                            loading="lazy"
+                          />
+                        </a>
+                      ) : (
+                        <a
+                          href={signedUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-xs text-umc-700 hover:text-umc-900 underline"
+                        >
+                          📄 Open {doc.original_filename || 'file'}
+                        </a>
+                      )}
+                    </div>
+                  )}
+                  {doc.kind === 'link' && doc.url && (
+                    <p className="mt-1">
+                      <a
+                        href={doc.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-xs text-umc-700 hover:text-umc-900 underline break-all"
+                      >
+                        🔗 {doc.url}
+                      </a>
+                    </p>
+                  )}
+                  {doc.kind === 'note' && doc.body && (
+                    <p className="text-xs text-gray-800 whitespace-pre-wrap mt-1 font-serif leading-relaxed">
+                      {doc.body}
+                    </p>
+                  )}
+                  {doc.summary && (
+                    <p className="text-[11px] text-gray-700 italic mt-1">
+                      Summary: {doc.summary}
+                    </p>
+                  )}
+                  {doc.notes && (
+                    <p className="text-[11px] text-gray-700 mt-1 whitespace-pre-wrap">
+                      {doc.notes}
+                    </p>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        </div>
       )}
     </>
   );

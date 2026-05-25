@@ -310,6 +310,15 @@ export async function commitImport({
   subjectPersonId,
   decisions = [],
   subjectUpdates = {},
+  // Phase C additions:
+  // inferredLinks: array of {person_a_id, person_b_id, relationship_a_to_b, notes?}
+  //   that the pastor approved from the "suggest auto-links" pass. Inserted
+  //   into pastoral_family_links stamped with this import's id.
+  // documentShareTargetIds: array of pastoral_people.id to receive a share
+  //   of the import's source_document_id. Inserted into
+  //   pastoral_document_shares stamped with shared_by_import_id = importId.
+  inferredLinks = [],
+  documentShareTargetIds = [],
 }) {
   if (!importId || !ownerUserId || !subjectPersonId) {
     throw new Error(
@@ -326,11 +335,16 @@ export async function commitImport({
     extended: 0,
     deaths: 0,
     shares: 0,
+    // Phase C: links created from the inferred relative-to-relative
+    // proposals (separate from `links` which counts subject ↔ relative).
+    inferred_links: 0,
     // Rows whose target was directory_link but a family_links row
     // between the subject and that person already existed. These
     // aren't errors — the relationship is already represented — so
     // we count them separately and surface a friendly note instead.
     already_linked: 0,
+    // Same idea for inferred links: pair already existed in the graph.
+    inferred_already_linked: 0,
     subject_patched: false,
   };
 
@@ -477,10 +491,122 @@ export async function commitImport({
     }
   }
 
-  // 4) Stamp the import as committed and bump updated_at.
+  // 4a) Phase C — inferred relative-to-relative links. Each entry has
+  //     person_a_id / person_b_id / relationship_a_to_b. Same duplicate-
+  //     handling posture as the directory_link rows above: existing pair
+  //     bumps inferred_already_linked; broken inputs go to rowErrors.
+  for (let i = 0; i < inferredLinks.length; i++) {
+    const link = inferredLinks[i];
+    const label = link?._label || `Inferred row ${i + 1}`;
+    try {
+      if (
+        !link?.person_a_id ||
+        !link?.person_b_id ||
+        link.person_a_id === link.person_b_id
+      ) {
+        throw new Error('Both people required, must be different.');
+      }
+      if (!isValidFamilyLinkEnum(link.relationship_a_to_b)) {
+        throw new Error(
+          `Relationship "${link.relationship_a_to_b || '(blank)'}" is not one of the allowed values.`
+        );
+      }
+      const { data: existing, error: existErr } = await withTimeout(
+        supabase
+          .from('pastoral_family_links')
+          .select('id')
+          .or(
+            `and(person_a_id.eq.${link.person_a_id},person_b_id.eq.${link.person_b_id}),` +
+              `and(person_a_id.eq.${link.person_b_id},person_b_id.eq.${link.person_a_id})`
+          )
+          .limit(1)
+      );
+      if (existErr) throw existErr;
+      if (existing && existing.length > 0) {
+        counts.inferred_already_linked += 1;
+        continue;
+      }
+      const { error: linkErr } = await withTimeout(
+        supabase.from('pastoral_family_links').insert({
+          owner_user_id: ownerUserId,
+          person_a_id: link.person_a_id,
+          person_b_id: link.person_b_id,
+          relationship_a_to_b: link.relationship_a_to_b,
+          notes: emptyString(link.notes) ? null : link.notes.trim(),
+          import_source_id: importId,
+        })
+      );
+      if (linkErr) throw linkErr;
+      counts.inferred_links += 1;
+    } catch (e) {
+      rowErrors.push({
+        index: decisions.length + i,
+        label,
+        message: e.message || String(e),
+      });
+    }
+  }
+
+  // 4b) Phase C — document shares. Fetch the import's source_document_id
+  //     (it may have been set after creation), then insert a share row
+  //     for each target id. Refuses to silently overwrite existing pairs.
+  if (
+    Array.isArray(documentShareTargetIds) &&
+    documentShareTargetIds.length > 0
+  ) {
+    // Re-read the import to get the latest source_document_id.
+    let importRow;
+    try {
+      importRow = await getImport(importId);
+    } catch (e) {
+      rowErrors.push({
+        index: 9999,
+        label: 'Document share lookup',
+        message: e.message || String(e),
+      });
+    }
+    if (importRow?.source_document_id) {
+      const targetIds = Array.from(new Set(documentShareTargetIds)).filter(
+        Boolean
+      );
+      for (const pid of targetIds) {
+        try {
+          // Dup check by (document_id, person_id).
+          const { data: existing, error: existErr } = await withTimeout(
+            supabase
+              .from('pastoral_document_shares')
+              .select('id')
+              .eq('document_id', importRow.source_document_id)
+              .eq('person_id', pid)
+              .limit(1)
+          );
+          if (existErr) throw existErr;
+          if (existing && existing.length > 0) continue;
+          const { error: shareErr } = await withTimeout(
+            supabase.from('pastoral_document_shares').insert({
+              document_id: importRow.source_document_id,
+              person_id: pid,
+              owner_user_id: ownerUserId,
+              shared_by_import_id: importId,
+            })
+          );
+          if (shareErr) throw shareErr;
+          counts.shares += 1;
+        } catch (e) {
+          rowErrors.push({
+            index: 10000,
+            label: `Share to ${pid.slice(0, 8)}…`,
+            message: e.message || String(e),
+          });
+        }
+      }
+    }
+  }
+
+  // 5) Stamp the import as committed and bump updated_at.
   const updated = await markCommitted(importId);
 
-  // 5) Surface a single combined error if any rows failed — but only
+  // 6) Surface a single combined error if any rows failed — but only
   //    AFTER we've committed the successful inserts, so the pastor
   //    doesn't lose the rows that did go in.
   if (rowErrors.length > 0) {

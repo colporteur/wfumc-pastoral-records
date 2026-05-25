@@ -2,7 +2,9 @@ import { useEffect, useMemo, useState } from 'react';
 import { useAuth } from '../contexts/AuthContext.jsx';
 import PersonPicker from './PersonPicker.jsx';
 import { commitImport, updateImport } from '../lib/recordImports';
-import { fullName } from '../lib/people';
+import { inferRelativeToRelative } from '../lib/claude';
+import { listLinksFor, relationshipLabel } from '../lib/familyLinks';
+import { getPerson, fullName } from '../lib/people';
 
 // Shared review UI for both the Clergy Record and Obituary importers.
 //
@@ -180,6 +182,98 @@ export default function RecordImportReviewPanel({
   const [error, setError] = useState(null);
   const [savedAt, setSavedAt] = useState(null);
 
+  // ---- Phase C: subject's existing directory family + inferred links ----
+  //
+  // existingFamily: array of { other_person_id, displayed_relationship,
+  //   other_person: { id, first_name, last_name, ... } } — subject's
+  //   existing directory family, loaded once on panel open. The
+  //   "Suggest auto-links" button uses this to compute proposals.
+  // inferredProposals: array of { person_a_id, person_b_id, relationship_a_to_b,
+  //   _label, _rationale, _confidence, _approved } — pastor toggles
+  //   _approved per row, and approved rows ride along on commit.
+  const [existingFamily, setExistingFamily] = useState([]);
+  const [existingFamilyLoading, setExistingFamilyLoading] = useState(false);
+  const [inferredProposals, setInferredProposals] = useState([]);
+  const [inferring, setInferring] = useState(false);
+  const [inferError, setInferError] = useState(null);
+  // documentShareTargetIds: pastoral_people.id list to receive a share
+  // of the import's source_document_id on commit. Defaults to every
+  // directory_link target currently in `decisions`.
+  const [shareTargetIds, setShareTargetIds] = useState(() => new Set());
+
+  // Load subject's existing directory family once per subject. The
+  // resolver in lib/familyLinks.js already normalizes the rows to
+  // "from THIS person's perspective" — we still need to fetch the
+  // OTHER person's row for the display label, so we hydrate that on
+  // the way back. Cheap; tiny dataset (a handful of links).
+  useEffect(() => {
+    let cancelled = false;
+    if (!subjectPerson?.id) {
+      setExistingFamily([]);
+      return undefined;
+    }
+    setExistingFamilyLoading(true);
+    (async () => {
+      try {
+        const links = await listLinksFor(subjectPerson.id);
+        // Hydrate the other-person rows in parallel — limited to ~15 to
+        // keep the burst sane. (Beyond that the pastor probably has a
+        // good reason and we still serve them.)
+        const ids = Array.from(
+          new Set(links.map((l) => l.other_person_id).filter(Boolean))
+        ).slice(0, 30);
+        const personRows = await Promise.all(
+          ids.map((id) => getPerson(id).catch(() => null))
+        );
+        const byId = new Map();
+        for (const row of personRows) if (row) byId.set(row.id, row);
+        const hydrated = links.map((l) => ({
+          ...l,
+          other_person: byId.get(l.other_person_id) || null,
+        }));
+        if (!cancelled) setExistingFamily(hydrated);
+      } catch (e) {
+        if (!cancelled) {
+          // eslint-disable-next-line no-console
+          console.warn('Failed to load subject family for auto-link:', e);
+          setExistingFamily([]);
+        }
+      } finally {
+        if (!cancelled) setExistingFamilyLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [subjectPerson?.id]);
+
+  // Default share-targets to the directory_link picks the pastor has
+  // currently accepted. Recomputed whenever the decision set or its
+  // directory_person_ids change.
+  useEffect(() => {
+    const defaults = new Set();
+    for (const d of decisions) {
+      if (
+        !d.skip &&
+        d.target === 'directory_link' &&
+        d.directory_person_id
+      ) {
+        defaults.add(d.directory_person_id);
+      }
+    }
+    setShareTargetIds(defaults);
+    // We deliberately don't depend on decisions itself (object identity
+    // changes every keystroke); the stringified ids list is what matters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    decisions
+      .filter((d) => !d.skip && d.target === 'directory_link')
+      .map((d) => d.directory_person_id)
+      .filter(Boolean)
+      .sort()
+      .join('|'),
+  ]);
+
   // Re-seed when the underlying import switches (e.g. user opened the
   // "Edit import" flow and we passed a different importRow in).
   useEffect(() => {
@@ -294,6 +388,122 @@ export default function RecordImportReviewPanel({
     }
   };
 
+  // ---- Phase C: Suggest auto-links ----
+  //
+  // For each directory_link decision (the "new relative") that has a
+  // directory_person_id, walk every existing family-link of the subject
+  // (the "existing relative") and ask Claude to infer the implied
+  // relationship between the new and existing relatives. Each proposal
+  // lands in `inferredProposals` with _approved=false by default; the
+  // pastor toggles which to keep.
+  const runSuggestAutoLinks = async () => {
+    setInferring(true);
+    setInferError(null);
+    try {
+      const newDirectoryLinks = decisions
+        .map((d, i) => ({ d, i }))
+        .filter(
+          ({ d }) =>
+            !d.skip &&
+            d.target === 'directory_link' &&
+            d.directory_person_id &&
+            d.directory_person_label
+        );
+      if (newDirectoryLinks.length === 0) {
+        setInferError(
+          'Assign at least one family member to "Directory link" first — auto-link only works for directory-linked relatives.'
+        );
+        return;
+      }
+      const existing = existingFamily.filter(
+        (l) =>
+          l.other_person_id &&
+          // Skip rows whose other person is already in the new-link set
+          // — Claude has no extra signal there.
+          !newDirectoryLinks.some(
+            ({ d }) => d.directory_person_id === l.other_person_id
+          )
+      );
+      if (existing.length === 0) {
+        setInferError(
+          'No existing directory family on the subject to auto-link to. Once a few family-link rows are added (manually or via this importer), the auto-link button will have material to work with.'
+        );
+        return;
+      }
+      const subjName = fullName(subjectPerson);
+      const proposals = [];
+      // Sequential Claude calls — the dataset is small (typical: 3-8
+      // new × 2-4 existing = 6-32 calls). Parallel bursts of more than
+      // ~5 risk Claude rate limits, so we keep it tidy.
+      for (const { d } of newDirectoryLinks) {
+        for (const ex of existing) {
+          const exLabel = ex.other_person
+            ? fullName(ex.other_person)
+            : '(directory member)';
+          try {
+            const inference = await inferRelativeToRelative({
+              subjectName: subjName,
+              relativeAName: d.directory_person_label,
+              relativeARelToSubject: d.relationship_to_subject || 'relative',
+              relativeBName: exLabel,
+              relativeBRelToSubject: relationshipLabel(
+                ex.displayed_relationship
+              ),
+            });
+            if (!inference.relationship_a_to_b) continue;
+            proposals.push({
+              person_a_id: d.directory_person_id,
+              person_b_id: ex.other_person_id,
+              relationship_a_to_b: inference.relationship_a_to_b,
+              _label: `${d.directory_person_label} → ${exLabel}`,
+              _rationale: inference.rationale || '',
+              _confidence: inference.confidence || 'medium',
+              // Default-approve high-confidence inferences; medium/low
+              // start unchecked so the pastor explicitly reviews them.
+              _approved: inference.confidence === 'high',
+            });
+          } catch (e) {
+            // eslint-disable-next-line no-console
+            console.warn('inferRelativeToRelative failed:', e);
+          }
+        }
+      }
+      setInferredProposals(proposals);
+      if (proposals.length === 0) {
+        setInferError(
+          'Claude couldn\'t produce any usable relationship inferences. You can still commit the panel without auto-links.'
+        );
+      }
+    } catch (e) {
+      setInferError(e.message || String(e));
+    } finally {
+      setInferring(false);
+    }
+  };
+
+  const toggleProposal = (idx) => {
+    setInferredProposals((prev) =>
+      prev.map((p, i) => (i === idx ? { ...p, _approved: !p._approved } : p))
+    );
+  };
+
+  const updateProposalRel = (idx, rel) => {
+    setInferredProposals((prev) =>
+      prev.map((p, i) =>
+        i === idx ? { ...p, relationship_a_to_b: rel } : p
+      )
+    );
+  };
+
+  const toggleShareTarget = (personId) => {
+    setShareTargetIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(personId)) next.delete(personId);
+      else next.add(personId);
+      return next;
+    });
+  };
+
   // Save edits and then run commitImport. Subject patches go in if the
   // user ticked their backfill checkboxes.
   const handleCommit = async () => {
@@ -312,13 +522,25 @@ export default function RecordImportReviewPanel({
           subjectUpdates[k] = backfillableFields[k];
         }
       }
-      // 3) Commit.
+      // 3) Commit. Inferred-link rows ride along if any were approved.
+      //    Document share targets default to directory-link picks; the
+      //    pastor can untick any they don't want shared.
+      const approvedInferred = inferredProposals
+        .filter((p) => p._approved)
+        .map((p) => ({
+          person_a_id: p.person_a_id,
+          person_b_id: p.person_b_id,
+          relationship_a_to_b: p.relationship_a_to_b,
+          _label: p._label,
+        }));
       const result = await commitImport({
         importId: importRow.id,
         ownerUserId: user.id,
         subjectPersonId: subjectPerson.id,
         decisions,
         subjectUpdates,
+        inferredLinks: approvedInferred,
+        documentShareTargetIds: Array.from(shareTargetIds),
       });
       onCommitted?.(result);
     } catch (e) {
@@ -453,6 +675,126 @@ export default function RecordImportReviewPanel({
           </button>
         </div>
       </fieldset>
+
+      {/* Auto-link to subject's existing directory family ------------- */}
+      <fieldset className="border border-gray-200 rounded p-3 space-y-2">
+        <legend className="px-1 text-xs uppercase tracking-wide text-gray-500">
+          Auto-link to subject's existing family
+          {existingFamilyLoading && (
+            <span className="ml-1 normal-case tracking-normal text-gray-400">
+              (loading…)
+            </span>
+          )}
+        </legend>
+        <p className="text-[11px] text-gray-500">
+          Ask Claude to infer relationships between your new directory-linked
+          relatives and the people already in <strong>{fullName(subjectPerson)}</strong>'s
+          family graph. Example: a newly-imported brother becomes a niece's
+          uncle. You approve each proposal before commit.
+        </p>
+        <div className="flex items-center gap-3 flex-wrap">
+          <button
+            type="button"
+            onClick={runSuggestAutoLinks}
+            disabled={inferring}
+            className="btn-secondary text-xs disabled:opacity-50"
+            title="Run Claude on each (new directory-linked relative × existing subject family) pair to suggest relative-to-relative links."
+          >
+            {inferring ? 'Asking Claude…' : '✨ Suggest auto-links'}
+          </button>
+          {existingFamily.length > 0 && (
+            <span className="text-[11px] text-gray-500">
+              {existingFamily.length} existing family-link
+              {existingFamily.length === 1 ? '' : 's'} on file
+            </span>
+          )}
+        </div>
+        {inferError && (
+          <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+            {inferError}
+          </p>
+        )}
+        {inferredProposals.length > 0 && (
+          <div className="space-y-1.5">
+            <p className="text-[11px] text-gray-500">
+              {inferredProposals.filter((p) => p._approved).length} of{' '}
+              {inferredProposals.length} proposal
+              {inferredProposals.length === 1 ? '' : 's'} approved. High-
+              confidence inferences are pre-checked; medium/low start
+              unchecked.
+            </p>
+            {inferredProposals.map((p, i) => (
+              <InferredProposalRow
+                key={i}
+                proposal={p}
+                onToggle={() => toggleProposal(i)}
+                onChangeRel={(rel) => updateProposalRel(i, rel)}
+              />
+            ))}
+          </div>
+        )}
+      </fieldset>
+
+      {/* Share source document with linked family -------------------- */}
+      {importRow.source_document_id &&
+        Array.from(shareTargetIds).length >= 0 && (
+          <fieldset className="border border-gray-200 rounded p-3 space-y-2">
+            <legend className="px-1 text-xs uppercase tracking-wide text-gray-500">
+              Share source document with linked family
+            </legend>
+            <p className="text-[11px] text-gray-500">
+              The Clergy Record / Obituary source is filed under{' '}
+              <strong>{fullName(subjectPerson)}</strong>'s Documents archive.
+              Tick the directory-linked relatives who should ALSO see it on
+              their own PersonDetail page (they'll see a "shared from"
+              badge). You can change this later from PersonDocuments.
+            </p>
+            {decisions
+              .filter(
+                (d) =>
+                  !d.skip &&
+                  d.target === 'directory_link' &&
+                  d.directory_person_id
+              ).length === 0 ? (
+              <p className="text-[11px] italic text-gray-500">
+                No directory-linked relatives in this import yet.
+              </p>
+            ) : (
+              <div className="space-y-1">
+                {decisions
+                  .filter(
+                    (d) =>
+                      !d.skip &&
+                      d.target === 'directory_link' &&
+                      d.directory_person_id
+                  )
+                  .map((d, i) => (
+                    <label
+                      key={d.directory_person_id + ':' + i}
+                      className="flex items-start gap-2 cursor-pointer text-xs text-gray-700"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={shareTargetIds.has(d.directory_person_id)}
+                        onChange={() =>
+                          toggleShareTarget(d.directory_person_id)
+                        }
+                        className="mt-0.5 h-3.5 w-3.5 rounded border-gray-300"
+                      />
+                      <span>
+                        {d.directory_person_label}
+                        {d.relationship_to_subject && (
+                          <span className="text-gray-400 ml-1">
+                            ({d.relationship_to_subject})
+                          </span>
+                        )}
+                      </span>
+                    </label>
+                  ))}
+              </div>
+            )}
+          </fieldset>
+        )}
 
       {/* Service info (read-only — pastor can copy into other places) */}
       {importRow?.raw_extraction?.service && (
@@ -798,6 +1140,60 @@ function FamilyDecisionRow({
           disabled={decision.skip}
         />
       </label>
+    </div>
+  );
+}
+
+function InferredProposalRow({ proposal, onToggle, onChangeRel }) {
+  const confidenceColor =
+    proposal._confidence === 'high'
+      ? 'text-green-700'
+      : proposal._confidence === 'low'
+        ? 'text-amber-700'
+        : 'text-gray-600';
+  return (
+    <div
+      className={
+        'rounded border p-2 flex items-start gap-2 ' +
+        (proposal._approved
+          ? 'border-umc-200 bg-umc-50/40'
+          : 'border-gray-200 bg-white')
+      }
+    >
+      <input
+        type="checkbox"
+        checked={!!proposal._approved}
+        onChange={onToggle}
+        className="mt-1 h-3.5 w-3.5 rounded border-gray-300 flex-shrink-0"
+      />
+      <div className="flex-1 min-w-0">
+        <div className="flex items-baseline gap-2 flex-wrap text-xs">
+          <span className="font-medium text-gray-800">{proposal._label}</span>
+          <span className="text-[10px] uppercase tracking-wide text-gray-500">
+            relationship A → B:
+          </span>
+          <select
+            value={proposal.relationship_a_to_b}
+            onChange={(e) => onChangeRel(e.target.value)}
+            className="text-xs border border-gray-300 rounded px-1 py-0.5 bg-white"
+            disabled={!proposal._approved}
+          >
+            {FAMILY_LINK_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+          <span className={'text-[10px] ' + confidenceColor}>
+            {proposal._confidence} confidence
+          </span>
+        </div>
+        {proposal._rationale && (
+          <p className="text-[11px] italic text-gray-500 mt-0.5">
+            {proposal._rationale}
+          </p>
+        )}
+      </div>
     </div>
   );
 }

@@ -103,16 +103,39 @@ export default function PersonRecordImports({ person, onChanged }) {
 
   const handleCommitted = (result) => {
     const c = result.counts || {};
-    const alreadyClause =
-      c.already_linked > 0
-        ? ` ${c.already_linked} row${c.already_linked === 1 ? '' : 's'} already linked (skipped).`
+    const skippedClauses = [];
+    if (c.already_linked > 0) {
+      skippedClauses.push(
+        `${c.already_linked} family-link row${
+          c.already_linked === 1 ? '' : 's'
+        } already linked`
+      );
+    }
+    if (c.inferred_already_linked > 0) {
+      skippedClauses.push(
+        `${c.inferred_already_linked} inferred link${
+          c.inferred_already_linked === 1 ? '' : 's'
+        } already in place`
+      );
+    }
+    const skippedSuffix =
+      skippedClauses.length > 0 ? ` Skipped: ${skippedClauses.join(', ')}.` : '';
+    const inferredClause =
+      c.inferred_links > 0
+        ? ` + ${c.inferred_links} inferred family link${
+            c.inferred_links === 1 ? '' : 's'
+          }`
+        : '';
+    const shareClause =
+      c.shares > 0
+        ? ` + ${c.shares} doc share${c.shares === 1 ? '' : 's'}`
         : '';
     setToast(
       result.partial
-        ? `Committed with some row errors (see panel above).${alreadyClause}`
+        ? `Committed with some row errors (see panel above).${skippedSuffix}`
         : `Committed: ${c.links || 0} family link${
             (c.links || 0) === 1 ? '' : 's'
-          }, ${c.extended || 0} extended-family, ${c.deaths || 0} significant-death.${alreadyClause}`
+          }, ${c.extended || 0} extended-family, ${c.deaths || 0} significant-death${inferredClause}${shareClause}.${skippedSuffix}`
     );
     refresh();
     onChanged?.();
