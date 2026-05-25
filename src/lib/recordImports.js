@@ -228,6 +228,277 @@ export async function clearImportArtifacts(importId) {
 }
 
 // =====================================================================
+// commitImport — the "create the actual rows" step
+// =====================================================================
+//
+// Given an import id, a structured set of `decisions` (one per
+// extracted family member, with their target table and pickable
+// directory match), and optional `subjectUpdates` (patches the pastor
+// approved for backfilling the directory person's blank fields),
+// create the family_links / extended_family / significant_deaths /
+// document_shares rows.
+//
+// Idempotent: if the import has been committed before, calls
+// clearImportArtifacts() first to wipe previously-stamped rows, then
+// inserts fresh ones. The committed_at timestamp is updated to "now"
+// on each commit.
+//
+// Family decision shape:
+//   {
+//     skip: false,
+//     name: "Mary Ann Lanier",
+//     status: "living" | "deceased",
+//     relationship_to_subject: "daughter",
+//     birth_date: null | "YYYY-MM-DD",
+//     death_date: null | "YYYY-MM-DD",
+//     notes: "",
+//     // Where this row should land:
+//     target: "directory_link" | "extended_family" | "significant_death",
+//     // Required if target = "directory_link": the pastoral_people.id
+//     // of the existing directory entry to link to. (Phase B does NOT
+//     // auto-create new directory entries — the pastor handles that.)
+//     directory_person_id: "uuid",
+//     // For directory_link: the relationship_a_to_b enum value to use
+//     // when inserting into pastoral_family_links. Should map the free-
+//     // text relationship_to_subject onto the closest enum value.
+//     family_link_relationship: "child" | "parent" | "sibling" | ...
+//   }
+//
+// Subject updates shape (any subset of these, all optional):
+//   { birthdate, death_date, place_of_birth, place_of_death,
+//     marital_status, church_affiliation, religion, address,
+//     is_deceased }   // pastor can flip is_deceased on commit
+//
+// Returns { counts: {links, extended, deaths, shares, subject_patched},
+//           import: <updated row> }.
+
+const FAMILY_LINK_RELATIONSHIPS = [
+  'spouse',
+  'sibling',
+  'parent',
+  'child',
+  'grandparent',
+  'grandchild',
+  'aunt_uncle',
+  'niece_nephew',
+  'cousin',
+  'in_law',
+  'other',
+];
+
+function isValidFamilyLinkEnum(v) {
+  return typeof v === 'string' && FAMILY_LINK_RELATIONSHIPS.includes(v);
+}
+
+function emptyString(v) {
+  return typeof v !== 'string' || v.trim().length === 0;
+}
+
+function normalizeDateOrNull(v) {
+  if (typeof v !== 'string') return null;
+  const s = v.trim();
+  if (!s) return null;
+  // The DATE column accepts YYYY-MM-DD; pass through anything matching,
+  // otherwise null it out so the insert doesn't throw.
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  return null;
+}
+
+export async function commitImport({
+  importId,
+  ownerUserId,
+  subjectPersonId,
+  decisions = [],
+  subjectUpdates = {},
+}) {
+  if (!importId || !ownerUserId || !subjectPersonId) {
+    throw new Error(
+      'commitImport requires importId, ownerUserId, subjectPersonId.'
+    );
+  }
+
+  // 1) Wipe any rows previously stamped by this import — so re-commits
+  //    don't accumulate duplicates next to the prior commit's rows.
+  await clearImportArtifacts(importId);
+
+  const counts = {
+    links: 0,
+    extended: 0,
+    deaths: 0,
+    shares: 0,
+    subject_patched: false,
+  };
+
+  // 2) Backfill subject fields (only the ones the pastor approved).
+  //    The review-panel UI only ships keys whose checkboxes were ticked,
+  //    so we trust the patch — but we still normalize date fields.
+  if (subjectUpdates && Object.keys(subjectUpdates).length > 0) {
+    const patch = {};
+    for (const [k, v] of Object.entries(subjectUpdates)) {
+      if (v === undefined) continue;
+      let value = v;
+      if (k === 'birthdate' || k === 'death_date') {
+        value = normalizeDateOrNull(v);
+      } else if (typeof v === 'string') {
+        value = v.trim() || null;
+      }
+      patch[k] = value;
+    }
+    if (Object.keys(patch).length > 0) {
+      const { error: subjErr } = await withTimeout(
+        supabase
+          .from('pastoral_people')
+          .update(patch)
+          .eq('id', subjectPersonId)
+      );
+      if (subjErr) throw subjErr;
+      counts.subject_patched = true;
+    }
+  }
+
+  // 3) For each accepted family decision, insert into the appropriate
+  //    table. We do NOT short-circuit on the first error — instead we
+  //    collect per-row errors and surface them at the end so the pastor
+  //    can see exactly which row failed without losing the rest.
+  const rowErrors = [];
+  for (let i = 0; i < decisions.length; i++) {
+    const d = decisions[i];
+    if (!d || d.skip) continue;
+    const label = d.name || `Row ${i + 1}`;
+    try {
+      if (d.target === 'directory_link') {
+        if (!d.directory_person_id) {
+          throw new Error(
+            'Pick the existing directory entry to link to (or change the target).'
+          );
+        }
+        if (d.directory_person_id === subjectPersonId) {
+          throw new Error('Cannot link a person to themselves.');
+        }
+        if (!isValidFamilyLinkEnum(d.family_link_relationship)) {
+          throw new Error(
+            `Relationship "${d.family_link_relationship || '(blank)'}" is not one of the allowed values.`
+          );
+        }
+        // Refuse duplicates between the same pair (in either direction),
+        // matching createLink()'s posture in familyLinks.js.
+        const { data: existing, error: existErr } = await withTimeout(
+          supabase
+            .from('pastoral_family_links')
+            .select('id')
+            .or(
+              `and(person_a_id.eq.${subjectPersonId},person_b_id.eq.${d.directory_person_id}),` +
+                `and(person_a_id.eq.${d.directory_person_id},person_b_id.eq.${subjectPersonId})`
+            )
+            .limit(1)
+        );
+        if (existErr) throw existErr;
+        if (existing && existing.length > 0) {
+          throw new Error(
+            'A family link already exists between these two people. Edit it manually, or change this row\'s target.'
+          );
+        }
+        const { error: linkErr } = await withTimeout(
+          supabase.from('pastoral_family_links').insert({
+            owner_user_id: ownerUserId,
+            person_a_id: subjectPersonId,
+            person_b_id: d.directory_person_id,
+            relationship_a_to_b: d.family_link_relationship,
+            notes: emptyString(d.notes) ? null : d.notes.trim(),
+            import_source_id: importId,
+          })
+        );
+        if (linkErr) throw linkErr;
+        counts.links += 1;
+      } else if (d.target === 'extended_family') {
+        if (emptyString(d.name)) {
+          throw new Error('Name is required for an extended-family row.');
+        }
+        const { error: extErr } = await withTimeout(
+          supabase.from('pastoral_extended_family').insert({
+            owner_user_id: ownerUserId,
+            person_id: subjectPersonId,
+            name: d.name.trim(),
+            relationship: emptyString(d.relationship_to_subject)
+              ? null
+              : d.relationship_to_subject.trim(),
+            // Phase 2 schema stores age as text — pass deceased-ness via
+            // notes so it's visible in the existing UI. (Phase D will
+            // surface anniversary derivation off significant_deaths +
+            // family_links, so we lean on those.)
+            age:
+              d.status === 'deceased'
+                ? 'deceased'
+                : null,
+            notes: emptyString(d.notes) ? null : d.notes.trim(),
+            import_source_id: importId,
+          })
+        );
+        if (extErr) throw extErr;
+        counts.extended += 1;
+      } else if (d.target === 'significant_death') {
+        if (emptyString(d.name)) {
+          throw new Error('Name is required for a significant-death row.');
+        }
+        const { error: dthErr } = await withTimeout(
+          supabase.from('pastoral_significant_deaths').insert({
+            owner_user_id: ownerUserId,
+            person_id: subjectPersonId,
+            name: d.name.trim(),
+            relationship: emptyString(d.relationship_to_subject)
+              ? null
+              : d.relationship_to_subject.trim(),
+            date_of_death: normalizeDateOrNull(d.death_date),
+            notes: emptyString(d.notes) ? null : d.notes.trim(),
+            import_source_id: importId,
+          })
+        );
+        if (dthErr) throw dthErr;
+        counts.deaths += 1;
+      } else {
+        throw new Error(
+          `Unknown target "${d.target}" — expected directory_link, extended_family, or significant_death.`
+        );
+      }
+    } catch (e) {
+      rowErrors.push({
+        index: i,
+        label,
+        message: e.message || String(e),
+      });
+    }
+  }
+
+  // 4) Stamp the import as committed and bump updated_at.
+  const updated = await markCommitted(importId);
+
+  // 5) Surface a single combined error if any rows failed — but only
+  //    AFTER we've committed the successful inserts, so the pastor
+  //    doesn't lose the rows that did go in.
+  if (rowErrors.length > 0) {
+    const summary = rowErrors
+      .slice(0, 5)
+      .map((r) => `  • ${r.label}: ${r.message}`)
+      .join('\n');
+    const more =
+      rowErrors.length > 5 ? `\n  …and ${rowErrors.length - 5} more` : '';
+    const err = new Error(
+      `${rowErrors.length} row${
+        rowErrors.length === 1 ? '' : 's'
+      } failed to commit:\n${summary}${more}\n\n` +
+        `The rest of the import was saved. Edit the failed rows and re-commit.`
+    );
+    err.partial = true;
+    err.counts = counts;
+    err.rowErrors = rowErrors;
+    err.import = updated;
+    throw err;
+  }
+
+  return { counts, import: updated };
+}
+
+// =====================================================================
 // URL-fetch wrapper — used by the Obituary importer to pull the page
 // body text BEFORE handing it to Claude. The existing url-fetch Edge
 // Function (in the Bulletin App's Supabase project) is already deployed

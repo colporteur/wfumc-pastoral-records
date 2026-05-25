@@ -12,6 +12,7 @@ import PersonCoreIssues from '../components/PersonCoreIssues.jsx';
 import PersonPrayerRequests from '../components/PersonPrayerRequests.jsx';
 import PersonPets from '../components/PersonPets.jsx';
 import PersonSignificantDeaths from '../components/PersonSignificantDeaths.jsx';
+import PersonRecordImports from '../components/PersonRecordImports.jsx';
 import ObituaryUpload from '../components/ObituaryUpload.jsx';
 import EulogyDraftModal from '../components/EulogyDraftModal.jsx';
 import PersonDocuments from '../components/PersonDocuments.jsx';
@@ -59,6 +60,36 @@ export default function PersonDetail() {
       setError(e.message || String(e));
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Re-fetch saved without touching the in-flight draft. Used after
+  // operations that update the person row from outside the main editor
+  // (e.g. the Record imports section backfilling birthdate / death_date
+  // on commit). We DO merge the changed fields into draft for fields
+  // the user hasn't been editing locally — otherwise the editor would
+  // still show stale values until the next page reload.
+  const refreshSavedPerson = async () => {
+    try {
+      const row = await getPerson(id);
+      const fresh = rowToDraft(row);
+      setSaved(row);
+      // Conservative merge: if the field is unchanged in the current
+      // draft vs the prior saved row, accept the fresh value. If the
+      // user has been editing that field, leave their value alone.
+      setDraft((prev) => {
+        if (!prev || !saved) return fresh;
+        const merged = { ...prev };
+        const prevSaved = rowToDraft(saved);
+        for (const k of Object.keys(fresh)) {
+          const userEdited =
+            JSON.stringify(prev[k]) !== JSON.stringify(prevSaved[k]);
+          if (!userEdited) merged[k] = fresh[k];
+        }
+        return merged;
+      });
+    } catch {
+      /* non-fatal — the next manual save / reload will refresh */
     }
   };
 
@@ -517,6 +548,18 @@ export default function PersonDetail() {
 
       <Section title="Significant deceased relationships">
         <PersonSignificantDeaths personId={id} />
+      </Section>
+
+      <Section title="Record imports (Clergy Record / Obituary)">
+        <PersonRecordImports
+          person={saved}
+          onChanged={() => {
+            // The importer can backfill subject fields (birthdate /
+            // death_date), so re-load the person row so the editor
+            // above reflects the freshly-committed data.
+            refreshSavedPerson();
+          }}
+        />
       </Section>
 
       <Section title="End of life & eulogy">
