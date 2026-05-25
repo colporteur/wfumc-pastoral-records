@@ -434,11 +434,12 @@ export default function ObituaryImportModal({
                 >
                   📸 Choose photo
                 </button>
+                {/* No `capture` attribute — see ClergyRecordImportModal
+                    for rationale. Mobile users need the gallery picker. */}
                 <input
                   ref={fileInputRef}
                   type="file"
                   accept="image/*"
-                  capture="environment"
                   className="hidden"
                   onChange={(e) => runPhotoImport(e.target.files)}
                 />

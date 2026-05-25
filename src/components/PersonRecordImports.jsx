@@ -102,14 +102,17 @@ export default function PersonRecordImports({ person, onChanged }) {
   };
 
   const handleCommitted = (result) => {
+    const c = result.counts || {};
+    const alreadyClause =
+      c.already_linked > 0
+        ? ` ${c.already_linked} row${c.already_linked === 1 ? '' : 's'} already linked (skipped).`
+        : '';
     setToast(
       result.partial
-        ? 'Committed with some row errors (see panel above).'
-        : `Committed: ${result.counts.links} family link${
-            result.counts.links === 1 ? '' : 's'
-          }, ${result.counts.extended} extended-family, ${
-            result.counts.deaths
-          } significant-death.`
+        ? `Committed with some row errors (see panel above).${alreadyClause}`
+        : `Committed: ${c.links || 0} family link${
+            (c.links || 0) === 1 ? '' : 's'
+          }, ${c.extended || 0} extended-family, ${c.deaths || 0} significant-death.${alreadyClause}`
     );
     refresh();
     onChanged?.();

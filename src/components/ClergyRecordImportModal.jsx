@@ -236,11 +236,13 @@ export default function ClergyRecordImportModal({
             >
               📸 Choose photo
             </button>
+            {/* No `capture` attribute — that would force phones into
+                camera-only mode. Without it, mobile browsers offer the
+                normal Camera / Photo Library / Files chooser. */}
             <input
               ref={fileInputRef}
               type="file"
               accept="image/*"
-              capture="environment"
               className="hidden"
               onChange={(e) => handleFile(e.target.files)}
             />

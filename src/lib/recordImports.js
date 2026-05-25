@@ -326,6 +326,11 @@ export async function commitImport({
     extended: 0,
     deaths: 0,
     shares: 0,
+    // Rows whose target was directory_link but a family_links row
+    // between the subject and that person already existed. These
+    // aren't errors — the relationship is already represented — so
+    // we count them separately and surface a friendly note instead.
+    already_linked: 0,
     subject_patched: false,
   };
 
@@ -394,9 +399,12 @@ export async function commitImport({
         );
         if (existErr) throw existErr;
         if (existing && existing.length > 0) {
-          throw new Error(
-            'A family link already exists between these two people. Edit it manually, or change this row\'s target.'
-          );
+          // Already linked — don't fail the commit; just bump the
+          // already_linked counter so the UI can mention it. The
+          // pastor can edit the existing link manually if they want to
+          // adjust the relationship.
+          counts.already_linked += 1;
+          continue;
         }
         const { error: linkErr } = await withTimeout(
           supabase.from('pastoral_family_links').insert({
