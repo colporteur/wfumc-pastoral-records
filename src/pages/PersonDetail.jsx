@@ -14,6 +14,7 @@ import PersonPets from '../components/PersonPets.jsx';
 import PersonSignificantDeaths from '../components/PersonSignificantDeaths.jsx';
 import PersonRecordImports from '../components/PersonRecordImports.jsx';
 import PersonalDatesExtras from '../components/PersonalDatesExtras.jsx';
+import ExtractFromFamilyModal from '../components/ExtractFromFamilyModal.jsx';
 import ObituaryUpload from '../components/ObituaryUpload.jsx';
 import EulogyDraftModal from '../components/EulogyDraftModal.jsx';
 import PersonDocuments from '../components/PersonDocuments.jsx';
@@ -45,11 +46,16 @@ export default function PersonDetail() {
   const coreIssuesRef = useRef(null);
   const refreshCoreIssues = () => coreIssuesRef.current?.refresh();
 
-  // Bumped after any operation that might change the subject's
-  // anniversary-relevant data — currently fired by the record-imports
-  // commit. Drives PersonalDatesExtras' useEffect to re-query.
-  const [datesRefreshKey, setDatesRefreshKey] = useState(0);
-  const bumpDatesRefresh = () => setDatesRefreshKey((k) => k + 1);
+  // Bumped after any operation that might change the subject's family
+  // graph — fired by record-imports commits and the Extract-from-family
+  // modal. Drives PersonalDatesExtras' useEffect to re-query AND is
+  // used as a `key` on the three family list components so they fully
+  // re-mount + re-fetch (they don't accept refreshKey props themselves).
+  const [graphRefreshKey, setGraphRefreshKey] = useState(0);
+  const bumpGraphRefresh = () => setGraphRefreshKey((k) => k + 1);
+
+  // Extract-from-linked-family modal open state.
+  const [extractOpen, setExtractOpen] = useState(false);
 
   // Eulogy-draft modal open state — pulled into the page so the modal
   // can live at the page root rather than inside the (collapsible)
@@ -494,7 +500,7 @@ export default function PersonDetail() {
         </Grid>
         <PersonalDatesExtras
           personId={id}
-          refreshKey={datesRefreshKey}
+          refreshKey={graphRefreshKey}
         />
       </Section>
 
@@ -550,15 +556,40 @@ export default function PersonDetail() {
       </Section>
 
       <Section title="Family (in directory)">
-        <PersonFamilyLinks personId={id} />
+        <div className="space-y-3">
+          <div className="flex justify-end">
+            <button
+              type="button"
+              onClick={() => setExtractOpen(true)}
+              className="btn-secondary text-xs"
+              title="Walk this person's directory-linked family and use Claude to propose new family-graph entries (e.g., your father's brother becomes your uncle)."
+            >
+              ✨ Extract relatives from linked family
+            </button>
+          </div>
+          {/* key={graphRefreshKey} forces a remount + re-fetch after
+              the extract modal commits new rows. PersonFamilyLinks
+              doesn't accept a refresh prop, so re-key is the simple
+              fix. */}
+          <PersonFamilyLinks
+            key={`family-links-${graphRefreshKey}`}
+            personId={id}
+          />
+        </div>
       </Section>
 
       <Section title="Extended family (not in directory)">
-        <PersonExtendedFamily personId={id} />
+        <PersonExtendedFamily
+          key={`extended-${graphRefreshKey}`}
+          personId={id}
+        />
       </Section>
 
       <Section title="Significant deceased relationships">
-        <PersonSignificantDeaths personId={id} />
+        <PersonSignificantDeaths
+          key={`deaths-${graphRefreshKey}`}
+          personId={id}
+        />
       </Section>
 
       <Section title="Record imports (Clergy Record / Obituary)">
@@ -572,7 +603,7 @@ export default function PersonDetail() {
             // picks up newly-committed significant_deaths and family
             // links without a page reload.
             refreshSavedPerson();
-            bumpDatesRefresh();
+            bumpGraphRefresh();
           }}
         />
       </Section>
@@ -665,6 +696,17 @@ export default function PersonDetail() {
           setSaved(updated);
           setDraft((d) => ({ ...d, eulogy_notes: newNotes }));
           setSavedAt(new Date());
+        }}
+      />
+
+      <ExtractFromFamilyModal
+        open={extractOpen}
+        onClose={() => setExtractOpen(false)}
+        subjectPerson={saved}
+        onCommitted={() => {
+          // Force the three family-list components + anniversaries to
+          // re-fetch by bumping the shared graphRefreshKey.
+          bumpGraphRefresh();
         }}
       />
     </div>
