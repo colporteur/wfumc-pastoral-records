@@ -225,6 +225,14 @@ function AnniversaryRow({ item }) {
   const monthDay = item._parsed
     ? item._parsed.toLocaleString(undefined, { month: 'long', day: 'numeric' })
     : item.date;
+  // Only show the "(would be X)" / "(X years ago)" suffix when the
+  // math is in a plausible human range. A negative years_ago means the
+  // source date is in the future (probably a typo); > 120 means the
+  // source year is wrong by a century or so (we've seen 1904 instead
+  // of 1938 in practice). Suppressing it avoids confidently displaying
+  // a nonsense number — and gives the pastor a visual signal to go
+  // check the underlying date.
+  const ageInRange = item._yearsAgo >= 0 && item._yearsAgo <= 120;
   return (
     <li className={'px-3 py-2 flex items-baseline gap-2 ' + containerClass}>
       <span className="text-base leading-none" aria-hidden="true">
@@ -234,23 +242,30 @@ function AnniversaryRow({ item }) {
         <div className="flex items-baseline gap-2 flex-wrap text-sm">
           <span className="font-medium text-gray-900">{monthDay}</span>
           <span className="text-gray-500 text-xs">{kindLabel}</span>
-          {item._yearsAgo > 0 && item.kind === 'death' && (
+          {ageInRange && item._yearsAgo > 0 && item.kind === 'death' && (
             <span className="text-[11px] text-gray-400">
               ({item._yearsAgo} year{item._yearsAgo === 1 ? '' : 's'} ago)
             </span>
           )}
-          {item._yearsAgo > 0 && item.kind === 'birthday' && (
+          {ageInRange && item._yearsAgo > 0 && item.kind === 'birthday' && (
             <span className="text-[11px] text-gray-400">
               (would be {item._yearsAgo})
             </span>
           )}
-        </div>
-        <div className="text-xs text-gray-700">
-          {item.relationship && (
-            <span className="text-gray-500 mr-1">
-              {capitalize(item.relationship)}:
+          {!ageInRange && (
+            <span
+              className="text-[11px] text-amber-700"
+              title={`Computed age (${item._yearsAgo}) is outside the plausible 0–120 range — the source birth or death date on the linked record may be wrong. Open the linked person to correct it.`}
+            >
+              (year looks off — check source)
             </span>
           )}
+        </div>
+        {/* Render the relationship with an explicit possessive so the
+            direction is unambiguous: "Sidney Lanier (your child)" reads
+            as "Sidney is your child" — if that's wrong, the pastor sees
+            it immediately and can fix the family link. */}
+        <div className="text-xs text-gray-700">
           {item.linkToPersonId ? (
             <Link
               to={`/people/${item.linkToPersonId}`}
@@ -260,6 +275,11 @@ function AnniversaryRow({ item }) {
             </Link>
           ) : (
             item.name
+          )}
+          {item.relationship && (
+            <span className="text-gray-500 ml-1">
+              (your {item.relationship.replace(/_/g, ' ')})
+            </span>
           )}
         </div>
       </div>
@@ -296,7 +316,3 @@ function parseIsoDate(iso) {
   return new Date(y, month, day);
 }
 
-function capitalize(s) {
-  if (!s) return '';
-  return s[0].toUpperCase() + s.slice(1);
-}
